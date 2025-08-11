@@ -1,50 +1,19 @@
-# --- OS cruft ---
-.DS_Store
-Thumbs.db
+# --- Project data: ignore everything, keep only __init__.py ---
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg-info/
-.eggs/
-dist/
-build/
-pip-wheel-metadata/
-.python-version
+# dataset (singular)
+dataset/**
+!dataset/__init__.py
 
-# Virtual envs
-.env
-.venv
-venv/
-ENV/
-
-# --- Jupyter ---
-.ipynb_checkpoints/
-
-# --- Testing / coverage ---
-.pytest_cache/
-.coverage
-htmlcov/
-
-# --- IDE / tooling ---
-.vscode/
-.idea/
-.ruff_cache/
-.mypy_cache/
-
-# --- Logs ---
-logs/
-*.log
-
-# --- Project data: only keep __init__.py at top-level of each folder ---
-datasets/**
-!datasets/__init__.py
-
+# models
 models/**
 !models/__init__.py
 
+# outputs
 outputs/**
 !outputs/__init__.py
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
