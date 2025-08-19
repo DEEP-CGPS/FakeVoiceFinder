@@ -1,21 +1,27 @@
 """
 CreateExperiment: prepare an experiment folder and a lightweight manifest.
 
-Key points
-----------
+What's included
+---------------
 - Always builds under: <repo_root>/outputs/<experiment_slug>/
 - Stores ONLY repo-relative paths in experiment.json (portable)
   e.g., "outputs/exp_demo/datasets/train/transforms/mel"
-- `original_dataset.path` now points INSIDE the experiment:
+- `original_dataset.path` points INSIDE the experiment:
     outputs/<exp>/datasets/{train|test}/original
   and we initialize `num_items` with 0 (filled later by PrepareDataset.save_original()).
+- One-liner `prepare_data(...)` to run: load -> split -> save originals -> transforms -> update manifest.
 
-This module does NOT train models or generate transforms; it only prepares structure.
+Design note
+-----------
+We NO LONGER normalize model names in the manifest. Your `cfg.models_list` entries
+are stored exactly as you type them (e.g., "AlexNet", "ResNet-18", "ViT-B/16").
+For checkpoint filenames we still apply a *minimal* sanitizer so the filename is
+safe across OSes.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 import re
 import os
@@ -88,9 +94,9 @@ class CreateExperiment:
 
         # Models section (one entry per model in config)
         models_section: Dict[str, Any] = {}
-        for raw_name in (self.cfg.models_list or []):
-            mname = self._normalize_model_name(raw_name)
-            models_section[mname] = {
+        for model_name in (self.cfg.models_list or []):
+            # Store model name EXACTLY as provided by the user (no normalization)
+            models_section[str(model_name)] = {
                 "loaded_path": None,   # e.g., outputs/<EXP>/models/loaded/<file>.pth
                 "trained_path": None,  # e.g., outputs/<EXP>/models/trained/<file>.pth
                 "train_parameters": {
@@ -149,13 +155,20 @@ class CreateExperiment:
     def checkpoint_filename(self, model_name: str, seed: int, transform: str,
                             epoch: int, key_metric: str, metric_value: float) -> str:
         """Format a trained checkpoint filename.
-        <Model>_seed<SEED>_<TRANSFORM>_epoch{EEE}_{KEY}{VAL}.pth
-        Example: AlexNet_seed23_mel_epoch020_acc0.91.pth
+
+        Uses a minimal sanitizer for the model name and metric key to ensure
+        cross-platform safe filenames, but keeps names human-readable.
+
+        Pattern:
+            <ModelSanitized>_seed<SEED>_<TRANSFORM>_epoch{EEE}_{KEY}{VAL}.pth
+
+        Example:
+            AlexNet_seed23_mel_epoch020_acc0.91.pth
         """
-        m = self._normalize_model_name(model_name)
+        m = self._safe_for_filename(model_name)  # minimal sanitization ONLY for filenames
         t = str(transform).lower()
         e = f"{int(epoch):03d}"
-        k = re.sub(r"[^A-Za-z0-9_]+", "", str(key_metric).lower())
+        k = "".join(ch for ch in str(key_metric).lower() if ch.isalnum() or ch == "_")
         v = f"{float(metric_value):.2f}"
         return f"{m}_seed{seed}_{t}_epoch{e}_{k}{v}.pth"
 
@@ -169,6 +182,51 @@ class CreateExperiment:
             raise RuntimeError("No experiment_dict in memory. Call build() first.")
         self._write_manifest(self.experiment_dict)
 
+    def prepare_data(
+        self,
+        train_ratio: float = 0.8,
+        seed: Optional[int] = None,
+        transforms: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        One-liner data preparation pipeline.
+
+        Steps:
+            1) Load ZIP members from cfg.data_path (reals.zip, fakes.zip).
+            2) Stratified split (train_ratio, seed).
+            3) Save originals into the experiment folder (and update num_items).
+            4) Apply transforms (if provided or from cfg.transform_list) and update manifest.
+
+        Args:
+            train_ratio: Proportion of data for the training split (0,1).
+            seed: Random seed; defaults to cfg.seed if None.
+            transforms: List of transform names to generate (e.g., ["mel","log"]).
+                        Defaults to cfg.transform_list when None.
+
+        Returns:
+            Summary dict with counts for each step.
+        """
+        # Lazy import to avoid circular import at module import time
+        from .prepare_dataset import PrepareDataset
+
+        sd = int(self.cfg.seed if seed is None else seed)
+        tlist = list(self.cfg.transform_list or []) if transforms is None else list(transforms)
+
+        prep = PrepareDataset(self)
+
+        summary: Dict[str, Any] = {}
+        summary["load"] = prep.load_data()
+        summary["split"] = prep.split(train_ratio=train_ratio, seed=sd)
+        summary["save_original"] = prep.save_original()
+
+        summary["transforms"] = {}
+        for t in tlist:
+            res = prep.transform(t)
+            prep.update_experiment_json(t)
+            summary["transforms"][str(t).lower()] = res
+
+        return summary
+
     # ---------------- internals ----------------
 
     @staticmethod
@@ -179,12 +237,14 @@ class CreateExperiment:
 
     @staticmethod
     def _slugify(name: str) -> str:
+        """Slug only for the experiment folder name."""
         name = name.strip().lower().replace(" ", "_")
         return re.sub(r"[^a-z0-9_\-]+", "", name)
 
     @staticmethod
-    def _normalize_model_name(name: str) -> str:
-        return re.sub(r"[^A-Za-z0-9_]+", "_", str(name)).strip("_")
+    def _safe_for_filename(s: str) -> str:
+        """Minimal sanitizer for filenames: keep alnum, dash, underscore; replace others with '_'."""
+        return "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(s))
 
     def _repo_rel(self, p: Path) -> str:
         """Return repo-relative POSIX path (always with '/')."""

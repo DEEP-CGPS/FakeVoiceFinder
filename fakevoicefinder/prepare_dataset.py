@@ -1,5 +1,5 @@
 """
-PrepareDataset (zip-only, manifest-driven counters):
+PrepareDataset (zip-only, manifest-driven counters) with tqdm progress bars:
 - Read TWO zips from cfg.data_path (reals.zip and fakes.zip).
 - Stratified split (scikit-learn).
 - Extract selected originals into the experiment:
@@ -9,9 +9,11 @@ PrepareDataset (zip-only, manifest-driven counters):
 - Update experiment.json:
     - Fill num_items for original_dataset (train/test).
     - Store transform params (light metadata).
+- Show tqdm progress bars during transform (one per split). If tqdm is not available,
+  the code still runs without progress bars.
 
 Dependencies:
-    pip install numpy librosa soundfile scikit-learn
+    pip install numpy librosa soundfile scikit-learn tqdm
 """
 from __future__ import annotations
 
@@ -26,6 +28,15 @@ except Exception as e:
     raise RuntimeError(
         "librosa is required for audio I/O and transforms. Install: pip install librosa soundfile"
     ) from e
+
+# tqdm (optional): if missing, fall back to a no-op wrapper
+try:
+    from tqdm.auto import tqdm
+    _HAS_TQDM = True
+except Exception:
+    _HAS_TQDM = False
+    def tqdm(iterable=None, **kwargs):  # type: ignore
+        return iterable if iterable is not None else range(0)
 
 from .experiment import CreateExperiment
 from .validatorsforvoice import ConfigError
@@ -181,8 +192,13 @@ class PrepareDataset:
 
     # 4) TRANSFORM -----------------------------------------------------------
 
-    def transform(self, transform_name: str) -> Dict[str, int]:
-        """Apply 'mel' or 'log' to originals (train/test) and save .npy under transforms/."""
+    def transform(self, transform_name: str, use_tqdm: bool = True) -> Dict[str, int]:
+        """Apply 'mel' or 'log' to originals (train/test) and save .npy under transforms/.
+
+        Args:
+            transform_name: 'mel' or 'log'
+            use_tqdm: if True, show a tqdm progress bar per split (train/test).
+        """
         tkey = transform_name.lower()
         if tkey not in {"mel", "log"}:
             raise ValueError("transform_name must be 'mel' or 'log'.")
@@ -193,25 +209,39 @@ class PrepareDataset:
         (self.exp.test_tf_root  / tkey / "real").mkdir(parents=True, exist_ok=True)
         (self.exp.test_tf_root  / tkey / "fake").mkdir(parents=True, exist_ok=True)
 
-        n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey)
-        n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey)
+        n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey,
+                                        use_tqdm=use_tqdm, desc=f"{tkey} • train")
+        n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey,
+                                        use_tqdm=use_tqdm, desc=f"{tkey} • test")
         return {"train": n_train, "test": n_test}
 
-    def _transform_split(self, orig_root: Path, out_root: Path, tkey: str) -> int:
-        """Read audios from orig_root/{reals|fakes} and write arrays to out_root/{real|fake}."""
-        n = 0
+    def _transform_split(self, orig_root: Path, out_root: Path, tkey: str,
+                         use_tqdm: bool, desc: str) -> int:
+        """Read audios from orig_root/{reals|fakes} and write arrays to out_root/{real|fake}.
+
+        Shows a tqdm bar if enabled and available.
+        """
+        # Collect file list first (for a proper total in tqdm)
+        files: List[Tuple[Path, str]] = []  # (wav_path, dst_cls)
         for src_cls, dst_cls in (("reals", "real"), ("fakes", "fake")):
             src_dir = orig_root / src_cls
             if not src_dir.exists():
                 continue
             for wav in src_dir.rglob("*"):
-                if not (wav.is_file() and wav.suffix.lower() in AUDIO_EXTS):
-                    continue
-                y, sr = librosa.load(str(wav), sr=self.sample_rate, mono=True)
-                arr = self._apply_transform(y, sr, tkey)
-                out_path = out_root / dst_cls / (wav.stem + ".npy")
-                np.save(str(out_path), arr.astype(np.float32))
-                n += 1
+                if wav.is_file() and wav.suffix.lower() in AUDIO_EXTS:
+                    files.append((wav, dst_cls))
+
+        iterator = files
+        if use_tqdm and _HAS_TQDM:
+            iterator = tqdm(files, total=len(files), desc=desc, unit="file", leave=False)
+
+        n = 0
+        for wav, dst_cls in iterator:
+            y, sr = librosa.load(str(wav), sr=self.sample_rate, mono=True)
+            arr = self._apply_transform(y, sr, tkey)
+            out_path = out_root / dst_cls / (wav.stem + ".npy")
+            np.save(str(out_path), arr.astype(np.float32))
+            n += 1
         return n
 
     def _apply_transform(self, y: np.ndarray, sr: int, tkey: str) -> np.ndarray:
