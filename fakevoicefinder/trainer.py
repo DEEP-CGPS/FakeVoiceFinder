@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -122,6 +123,7 @@ class Trainer:
             print("⚠️ CUDA not available; falling back to CPU.")
             d = "cpu"
         self.device = torch.device("cuda" if d in ("gpu", "cuda") else "cpu")
+        print(f"[Trainer] Using device: {self.device}", flush=True)
 
         # Seed
         torch.manual_seed(int(self.cfg.seed))
@@ -149,13 +151,17 @@ class Trainer:
         transforms = self._list_transforms()
         if not transforms:
             raise RuntimeError("No transforms found in manifest to train on.")
+        print(f"[Trainer] Transforms to train: {transforms}", flush=True)
 
         models = self.manifest.get("experiment", {}).get("models", {})
+        print(f"[Trainer] Models found: {list(models.keys())}", flush=True)
+
         results: Dict[str, Dict[str, Dict[str, str]]] = {}
 
         for model_name, entry in models.items():
             loaded_variants: Dict[str, str] = entry.get("loaded_variants", {})
             if not loaded_variants:
+                print(f"[Trainer] Skipping '{model_name}' (no loaded_variants).", flush=True)
                 continue
 
             # Hyperparameters (per-model overrides fallback to config defaults)
@@ -168,16 +174,28 @@ class Trainer:
             seed = int(params.get("seed", self.cfg.seed))
             num_workers = int(params.get("num_workers", self.cfg.num_workers))
 
+            print(f"\n=== MODEL: {model_name} ===", flush=True)
+            print(f"[{model_name}] Hyperparams -> epochs={epochs}, lr={lr}, bs={bs}, "
+                  f"optimizer={optim_name}, patience={patience}, seed={seed}, "
+                  f"num_workers={num_workers}", flush=True)
+
             for transform in transforms:
                 train_loader, test_loader = self._build_loaders(transform, batch_size=bs, num_workers=num_workers)
+                n_tr_items = len(train_loader.dataset)
+                n_te_items = len(test_loader.dataset)
+                print(f"[{model_name}][{transform}] Dataset sizes -> train: {n_tr_items}, test: {n_te_items}", flush=True)
+                print(f"[{model_name}][{transform}] Batches -> train: {len(train_loader)}, test: {len(test_loader)}", flush=True)
+
                 trained_for_transform: Dict[str, str] = {}
 
                 for variant, ckpt_rel in loaded_variants.items():
                     ckpt_path = self.repo_root / ckpt_rel
+                    print(f"[{model_name}][{transform}][{variant}] Loading checkpoint: {ckpt_path}", flush=True)
 
                     if variant in ("scratch", "pretrain"):
                         # Benchmark PICKLED nn.Module: load as module (unsafe but requested)
                         model = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+                        print(f"[{model_name}][{transform}][{variant}] Loaded pickled module.", flush=True)
                         model.to(self.device)
                         torch.manual_seed(seed)
 
@@ -200,6 +218,7 @@ class Trainer:
                     elif variant == "usermodel_jit":
                         # TorchScript user model: load module and train as-is (no surgery)
                         model = torch.jit.load(str(ckpt_path), map_location="cpu")
+                        print(f"[{model_name}][{transform}][{variant}] Loaded TorchScript module.", flush=True)
                         model.to(self.device)
                         torch.manual_seed(seed)
 
@@ -220,14 +239,16 @@ class Trainer:
                         trained_for_transform[variant] = self._repo_rel(best_path)
 
                     else:
-                        # Unknown variant; ignore
+                        print(f"[{model_name}][{transform}] Unknown variant '{variant}' (skipped).", flush=True)
                         continue
 
                 if trained_for_transform:
                     self._update_trained_variants(model_name, transform, trained_for_transform)
                     results.setdefault(model_name, {})[transform] = trained_for_transform
+                    print(f"[{model_name}][{transform}] Trained variants: {trained_for_transform}", flush=True)
 
         self._write_manifest()
+        print("\n[Trainer] All training finished.", flush=True)
         return results
 
     # ----------- helpers -----------
@@ -320,8 +341,14 @@ class Trainer:
         epochs_no_improve = 0
         best_model_snapshot = None  # for pickled save
 
+        print(f"[{model_name}][{transform}][{variant}] Start training for {epochs} epochs", flush=True)
+
         for epoch in range(1, int(epochs) + 1):
+            t0 = time.time()
             model.train()
+            running_loss = 0.0
+            batches = 0
+
             for x, y in train_loader:
                 x = x.to(self.device)
                 y = y.to(self.device)
@@ -333,16 +360,30 @@ class Trainer:
                 loss.backward()
                 optimizer.step()
 
+                running_loss += float(loss.item())
+                batches += 1
+
+            avg_loss = running_loss / max(1, batches)
             acc = self._eval_acc(model, test_loader)
+            dt = time.time() - t0
+
+            print(f"[{model_name}][{transform}][{variant}] "
+                  f"Epoch {epoch}/{epochs} - loss={avg_loss:.4f} acc={acc:.4f} ({dt:.1f}s)",
+                  flush=True)
+
             if acc > best_acc:
                 best_acc = acc
                 best_epoch = epoch
                 epochs_no_improve = 0
                 if save_as == "pickle":
                     best_model_snapshot = model
+                print(f"[{model_name}][{transform}][{variant}] ✅ New best acc={best_acc:.4f} at epoch {best_epoch}",
+                      flush=True)
             else:
                 epochs_no_improve += 1
                 if epochs_no_improve >= int(patience):
+                    print(f"[{model_name}][{transform}][{variant}] Early stop (no improvement for {patience} epochs).",
+                          flush=True)
                     break
 
         acc_tag = f"{best_acc:.2f}"
@@ -359,6 +400,7 @@ class Trainer:
             to_save = best_model_snapshot if best_model_snapshot is not None else model
             torch.save(to_save, str(out_path))
 
+        print(f"[{model_name}][{transform}][{variant}] Saved best checkpoint -> {out_path.name}", flush=True)
         return out_path
 
     def _update_trained_variants(self, model_name: str, transform: str, variant_map: Dict[str, str]) -> None:
@@ -380,3 +422,4 @@ class Trainer:
         """Convert an absolute path to a repository-relative POSIX path."""
         rel = os.path.relpath(str(Path(p).resolve()), str(self.repo_root.resolve()))
         return rel.replace(os.sep, "/")
+
