@@ -13,12 +13,13 @@ Benchmark models
 ----------------
 - Torchvision architectures: 'scratch' / 'pretrain'.
 - We adapt input channels (if needed) and replace the final classifier with 2 outputs.
-- We (optionally) append a Softmax (as per project requirement).
-- **Saved as PICKLED `nn.Module` but with `.pt` extension** in outputs/<EXP>/models/loaded/.
+- We **DO NOT** append Softmax here; the trainer will append Softmax when saving
+  the best-trained checkpoint for inference.
+- Saved as PICKLED `nn.Module` (extension `.pt`) into outputs/<EXP>/models/loaded/.
 
 Security note
 -------------
-Pickled nn.Module requires trusting the file on load (executes Python).
+Loading pickled nn.Module requires trusting the file on load (executes Python).
 """
 
 from __future__ import annotations
@@ -46,11 +47,6 @@ from .validatorsforvoice import ConfigError
 def _safe_filename(s: str) -> str:
     """Keep alnum, dash, underscore; replace others with '_'."""
     return "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(s))
-
-
-def _append_softmax(model: nn.Module, add: bool) -> nn.Module:
-    """Wrap with Softmax(dim=1) if requested."""
-    return nn.Sequential(model, nn.Softmax(dim=1)) if add else model
 
 
 def _find_first_conv(module: nn.Module) -> Optional[Tuple[nn.Module, str, nn.Conv2d]]:
@@ -123,7 +119,7 @@ def _find_last_linear(module: nn.Module):
 def _replace_final_layer_for_arch(model: nn.Module, arch: str, num_classes: int = 2) -> nn.Module:
     """
     Replace the final classifier depending on torchvision architecture,
-    falling back to the last Linear if needed.
+    falling back to the last Linear if needed. No Softmax is added here.
     """
     a = arch.lower()
 
@@ -230,8 +226,8 @@ class ModelLoader:
     Prepare models according to config and save them under models/loaded/.
 
     - Benchmarks (torchvision): 'scratch' / 'pretrain' — saved as **pickled nn.Module**
-      but with `.pt` extension.
-    - User models (TorchScript ONLY): copied (re-saved) untouched as
+      with `.pt` extension. Final head set to 2 outputs; **no Softmax added here**.
+    - User models (TorchScript ONLY): copied (re-saved) unchanged as
       <basename>_usermodel_jit.pt.
     """
 
@@ -246,7 +242,7 @@ class ModelLoader:
     def prepare_benchmarks(
         self,
         *,
-        add_softmax: bool = True,
+        add_softmax: bool = False,             # <-- now False by default; ignored (no softmax here)
         input_channels: Optional[int] = None,
     ) -> Dict[str, Dict[str, str]]:
         """
@@ -269,20 +265,20 @@ class ModelLoader:
                 m = _instantiate_torchvision(model_name, pretrained=False)
                 _adapt_first_conv_in_channels(m, in_ch)
                 m = _replace_final_layer_for_arch(m, model_name, num_classes=2)
-                m = _append_softmax(m, add=add_softmax)
+                # No Softmax here
                 fname = f"{_safe_filename(model_name)}_scratch.pt"
                 fpath = self.exp.loaded_models / fname
-                torch.save(m, str(fpath))  # <-- PICKLED MODULE, .pt extension
+                torch.save(m, str(fpath))  # PICKLED MODULE, .pt extension
                 saved["scratch"] = self._repo_rel(fpath)
 
             if want_pretrain:
                 m = _instantiate_torchvision(model_name, pretrained=True)
                 _adapt_first_conv_in_channels(m, in_ch)
                 m = _replace_final_layer_for_arch(m, model_name, num_classes=2)
-                m = _append_softmax(m, add=add_softmax)
+                # No Softmax here
                 fname = f"{_safe_filename(model_name)}_pretrain.pt"
                 fpath = self.exp.loaded_models / fname
-                torch.save(m, str(fpath))  # <-- PICKLED MODULE, .pt extension
+                torch.save(m, str(fpath))  # PICKLED MODULE, .pt extension
                 saved["pretrain"] = self._repo_rel(fpath)
 
             results[str(model_name)] = saved
@@ -296,9 +292,9 @@ class ModelLoader:
     def prepare_user_models(
         self,
         *,
-        add_softmax: bool = True,          # ignored for JIT
+        add_softmax: bool = False,             # ignored for JIT (kept for signature symmetry)
         input_channels: Optional[int] = None,  # ignored for JIT
-        weights_only: bool = True,         # ignored for JIT
+        weights_only: bool = True,             # ignored for JIT
     ) -> Dict[str, str]:
         """
         Discover user TorchScript archives under cfg.models_path, load & re-save them
