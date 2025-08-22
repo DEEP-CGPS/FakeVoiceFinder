@@ -10,6 +10,7 @@ What's included
     outputs/<exp>/datasets/{train|test}/original
   and we initialize `num_items` with 0 (filled later by PrepareDataset.save_original()).
 - One-liner `prepare_data(...)` to run: load -> split -> save originals -> transforms -> update manifest.
+- Creates a 'reports/' folder and records its repo-relative path in the manifest.
 
 Design note
 -----------
@@ -45,7 +46,7 @@ class CreateExperiment:
         self.slug = self._slugify(self.exp_name)
 
         # Repo root and outputs base (fixed)
-        self.repo_root = Path(__file__).resolve().parents[1]  # parent of 'forvoice'
+        self.repo_root = Path(__file__).resolve().parents[1]  # parent of package root
         outputs_base = self.repo_root / "outputs"
         outputs_base.mkdir(parents=True, exist_ok=True)
 
@@ -65,6 +66,9 @@ class CreateExperiment:
         self.train_tf_root = self.train_root / "transforms"
         self.test_tf_root = self.test_root / "transforms"
 
+        # NEW: reports root
+        self.reports_root = self.root / "reports"
+
         self.experiment_dict: Optional[Dict[str, Any]] = None  # set by build()
 
     # ---------------- public API ----------------
@@ -82,6 +86,7 @@ class CreateExperiment:
                 self.models_root, self.loaded_models, self.trained_models,
                 self.ds_root, self.train_root, self.test_root,
                 self.train_tf_root, self.test_tf_root,
+                self.reports_root,  # <- ensure reports/ exists
             ]:
                 p.mkdir(parents=True, exist_ok=True)
             if include_original_subfolders:
@@ -142,6 +147,10 @@ class CreateExperiment:
                     "num_items": 0,  # will be filled after save_original()
                 },
                 "transforms_dataset": test_transforms,
+            },
+            # NEW: reports section (repo-relative)
+            "reports": {
+                "path": self._repo_rel(self.reports_root)
             },
         }
 
