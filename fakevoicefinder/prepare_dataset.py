@@ -1,30 +1,40 @@
+# prepare_dataset.py
 """
 PrepareDataset (zip-only, manifest-driven counters):
 - Read TWO zips from cfg.data_path (reals.zip and fakes.zip).
 - Stratified split (scikit-learn).
 - Extract selected originals into the experiment:
     outputs/<EXP>/datasets/{train|test}/original/{reals|fakes}/<filename>.<ext>
-- Apply transforms ('mel', 'log') and save features as .npy under:
+- Apply transforms ('mel', 'log', 'dwt') and save features as .npy under:
     outputs/<EXP>/datasets/<split>/transforms/<transform>/{real|fake}/<basename>.npy
+  * DWT se reescala a 224x224 para compatibilidad con CNN/ViT (AlexNet, VGG, ResNet, ViT).
 - Update experiment.json:
     - Fill num_items for original_dataset (train/test).
     - Store transform params (light metadata).
 
 Dependencies:
-    pip install numpy librosa soundfile scikit-learn
+    pip install numpy librosa soundfile scikit-learn PyWavelets
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
+
 import zipfile
 import numpy as np
 
 try:
     import librosa
 except Exception as e:
+        raise RuntimeError(
+            "librosa is required for audio I/O and transforms. Install: pip install librosa soundfile"
+        ) from e
+
+try:
+    import pywt  # DWT
+except Exception as e:
     raise RuntimeError(
-        "librosa is required for audio I/O and transforms. Install: pip install librosa soundfile"
+        "PyWavelets (pywt) is required for the DWT transform. Install: pip install PyWavelets"
     ) from e
 
 from .experiment import CreateExperiment
@@ -34,12 +44,12 @@ from .validatorsforvoice import ConfigError
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
 # Types
-ZipMember = Tuple[Path, str]           # (zip_path, member_name)
-LabeledMember = Tuple[ZipMember, int]  # ((zip_path, member), label_int) — 0=reals, 1=fakes
+ZipMember = Tuple[Path, str]            # (zip_path, member_name)
+LabeledMember = Tuple[ZipMember, int]   # ((zip_path, member), label_int) — 0=reals, 1=fakes
 
 
 class PrepareDataset:
-    """Minimal ZIP-based preparer that writes into an existing experiment layout."""
+    """ZIP-based preparer that writes into an existing experiment layout."""
 
     def __init__(self, exp: CreateExperiment) -> None:
         if exp.experiment_dict is None:
@@ -64,6 +74,7 @@ class PrepareDataset:
         self.sample_rate = 16000
         self.mel_params = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
         self.log_params = dict(n_fft=1024, hop_length=256, win_length=None)
+        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # NEW
 
     # 1) LOAD ----------------------------------------------------------------
 
@@ -108,18 +119,14 @@ class PrepareDataset:
 
         items: List[ZipMember] = real + fake
         labels: List[int] = [0] * len(real) + [1] * len(fake)
-        idx = list(range(len(items)))
 
-        Xtr, Xte, ytr, yte = train_test_split(
-            idx, labels,
-            train_size=train_ratio,
-            random_state=int(seed),
-            stratify=labels,
-            shuffle=True,
+        x_train, x_test, y_train, y_test = train_test_split(
+            items, labels, test_size=(1.0 - float(train_ratio)),
+            random_state=int(seed), stratify=labels, shuffle=True
         )
 
-        self.train_items = [((items[i][0], items[i][1]), int(lbl)) for i, lbl in zip(Xtr, ytr)]
-        self.test_items  = [((items[i][0], items[i][1]), int(lbl)) for i, lbl in zip(Xte, yte)]
+        self.train_items = list(zip(x_train, y_train))
+        self.test_items = list(zip(x_test, y_test))
 
         return {
             "train": {"total": len(self.train_items), "reals": sum(1 for _, y in self.train_items if y == 0),
@@ -161,7 +168,9 @@ class PrepareDataset:
                 n += 1
                 continue
             with zipfile.ZipFile(zip_path, "r") as zf:
-                data = zf.read(member)
+                with zf.open(member) as src:
+                    data = src.read()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             with open(out_path, "wb") as f:
                 f.write(data)
             n += 1
@@ -182,10 +191,10 @@ class PrepareDataset:
     # 4) TRANSFORM -----------------------------------------------------------
 
     def transform(self, transform_name: str) -> Dict[str, int]:
-        """Apply 'mel' or 'log' to originals (train/test) and save .npy under transforms/."""
+        """Apply 'mel', 'log' o 'dwt' to originals (train/test) and save .npy under transforms/."""
         tkey = transform_name.lower()
-        if tkey not in {"mel", "log"}:
-            raise ValueError("transform_name must be 'mel' or 'log'.")
+        if tkey not in {"mel", "log", "dwt"}:
+            raise ValueError("transform_name must be 'mel', 'log' o 'dwt'.")
 
         # Ensure destinations
         (self.exp.train_tf_root / tkey / "real").mkdir(parents=True, exist_ok=True)
@@ -209,7 +218,7 @@ class PrepareDataset:
                     continue
                 y, sr = librosa.load(str(wav), sr=self.sample_rate, mono=True)
 
-                # === Cambio mínimo solicitado: duración fija de 3 segundos ===
+                # Duración fija de 3 segundos (recorte/zero-pad)
                 y = librosa.util.fix_length(y, size=int(sr * 3.0))
 
                 arr = self._apply_transform(y, sr, tkey)
@@ -217,6 +226,33 @@ class PrepareDataset:
                 np.save(str(out_path), arr.astype(np.float32))
                 n += 1
         return n
+
+    # ---------- Helper: 2D resize (sin dependencias externas) ---------------
+    def _resize_2d(self, img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+        """
+        Redimensiona img (H,W) a (target_h, target_w) mediante interpolación 1D
+        primero en ancho (por filas) y luego en alto (por columnas).
+        """
+        h, w = img.shape
+        # Redimensionar ancho (por filas)
+        x_old = np.linspace(0.0, 1.0, num=w, dtype=np.float32)
+        x_new = np.linspace(0.0, 1.0, num=target_w, dtype=np.float32)
+        tmp = np.empty((h, target_w), dtype=np.float32)
+        for i in range(h):
+            tmp[i, :] = np.interp(x_new, x_old, img[i, :])
+
+        # Redimensionar alto (por columnas)
+        if h == 1:
+            # Caso borde: si solo hay 1 fila, replicar
+            out = np.repeat(tmp, repeats=target_h, axis=0)
+            return out.astype(np.float32)
+
+        y_old = np.linspace(0.0, 1.0, num=h, dtype=np.float32)
+        y_new = np.linspace(0.0, 1.0, num=target_h, dtype=np.float32)
+        out = np.empty((target_h, target_w), dtype=np.float32)
+        for j in range(target_w):
+            out[:, j] = np.interp(y_new, y_old, tmp[:, j])
+        return out.astype(np.float32)
 
     def _apply_transform(self, y: np.ndarray, sr: int, tkey: str) -> np.ndarray:
         if tkey == "mel":
@@ -231,6 +267,7 @@ class PrepareDataset:
                 power=2.0,
             )
             return librosa.power_to_db(S, ref=np.max)
+
         elif tkey == "log":
             D = librosa.stft(
                 y=y,
@@ -240,6 +277,32 @@ class PrepareDataset:
             )
             amp = np.abs(D)
             return librosa.amplitude_to_db(amp, ref=np.max)
+
+        elif tkey == "dwt":
+            # Escalograma DWT 2D (filas = [cA_L, cD_L, ..., cD_1]) + resize 224x224
+            wavelet = self.dwt_params.get("wavelet", "db4")
+            level   = int(self.dwt_params.get("level", 4))
+            mode    = self.dwt_params.get("mode", "symmetric")
+
+            coeffs = pywt.wavedec(y, wavelet=wavelet, level=level, mode=mode)  # [cA_L, cD_L, ..., cD_1]
+            coeffs_abs = [np.abs(c) for c in coeffs]
+
+            # Alinear longitudes: padding con ceros a la derecha
+            max_len = max(c.shape[-1] for c in coeffs_abs)
+            rows: List[np.ndarray] = []
+            for c in coeffs_abs:
+                if c.shape[-1] < max_len:
+                    c = np.pad(c, (0, max_len - c.shape[-1]), mode="constant", constant_values=0)
+                rows.append(c.astype(np.float32))
+
+            scalogram = np.stack(rows, axis=0)  # (niveles+1, ancho)
+
+            # 🔧 Paso clave: redimensionar para compatibilidad CNN/ViT
+            TARGET_H, TARGET_W = 224, 224
+            scalogram = self._resize_2d(scalogram, TARGET_H, TARGET_W)
+
+            return scalogram
+
         else:
             raise ValueError(f"Unsupported transform '{tkey}'.")
 
@@ -263,4 +326,7 @@ class PrepareDataset:
             return dict(sample_rate=self.sample_rate, **self.mel_params)
         if tkey == "log":
             return dict(sample_rate=self.sample_rate, **self.log_params)
+        if tkey == "dwt":
+            return dict(sample_rate=self.sample_rate, **self.dwt_params)
         return {}
+
