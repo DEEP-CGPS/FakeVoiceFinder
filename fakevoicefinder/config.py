@@ -72,6 +72,9 @@ class ExperimentConfig(ValidationMixin):
         self.reals_zip: str = "reals.zip"
         self.fakes_zip: str = "fakes.zip"
 
+        # --- (NEW) Optional clip window (seconds). If None, defaults to 3.0s in PrepareDataset
+        self.clip_seconds: Optional[float] = None
+
     # ---------- Convenience constructors ----------
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ExperimentConfig":

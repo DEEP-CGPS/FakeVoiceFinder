@@ -90,6 +90,17 @@ class PrepareDataset:
             self.dwt_params.update(user_dwt)
         # === end overrides ===
 
+        # === MINIMAL CHANGE: optional clip length in seconds (default 3.0) ===
+        clip_val = getattr(self.cfg, "clip_seconds", None)
+        try:
+            cs = float(clip_val) if clip_val is not None else 3.0
+        except Exception:
+            cs = 3.0
+        if not (cs > 0):
+            cs = 3.0
+        self.clip_seconds = cs
+        # === end clip ===
+
     # 1) LOAD ----------------------------------------------------------------
 
     def load_data(self) -> Dict[str, int]:
@@ -219,7 +230,7 @@ class PrepareDataset:
         n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey)
         n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey)
 
-        # MINIMAL ADD: write transform hyperparameters to experiment.json
+        # keep manifest params updated (includes clip_seconds now)
         self.update_experiment_json(tkey)
 
         return {"train": n_train, "test": n_test}
@@ -236,8 +247,8 @@ class PrepareDataset:
                     continue
                 y, sr = librosa.load(str(wav), sr=self.sample_rate, mono=True)
 
-                # Duración fija de 3 segundos (recorte/zero-pad)
-                y = librosa.util.fix_length(y, size=int(sr * 3.0))
+                # === MINIMAL CHANGE: usar ventana configurable (default 3.0 s) ===
+                y = librosa.util.fix_length(y, size=int(sr * self.clip_seconds))
 
                 arr = self._apply_transform(y, sr, tkey)
                 out_path = out_root / dst_cls / (wav.stem + ".npy")
@@ -340,12 +351,15 @@ class PrepareDataset:
         self.exp.update_manifest()
 
     def _params_for_transform(self, tkey: str) -> Dict[str, Any]:
+        # Include sample_rate and the chosen clip_seconds in every transform params
+        base = {"sample_rate": self.sample_rate, "clip_seconds": self.clip_seconds}
         if tkey == "mel":
-            return dict(sample_rate=self.sample_rate, **self.mel_params)
+            return {**base, **self.mel_params}
         if tkey == "log":
-            return dict(sample_rate=self.sample_rate, **self.log_params)
+            return {**base, **self.log_params}
         if tkey == "dwt":
-            return dict(sample_rate=self.sample_rate, **self.dwt_params)
+            return {**base, **self.dwt_params}
         return {}
+
 
 
