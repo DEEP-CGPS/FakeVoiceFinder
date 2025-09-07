@@ -75,6 +75,9 @@ class ExperimentConfig(ValidationMixin):
         # --- (NEW) Optional clip window (seconds). If None, defaults to 3.0s in PrepareDataset
         self.clip_seconds: Optional[float] = None
 
+        # --- (NEW) Optional image size for transforms (e.g., 224 for ViT). If None, no resize in mel/log.
+        self.image_size: Optional[int] = None
+
     # ---------- Convenience constructors ----------
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ExperimentConfig":

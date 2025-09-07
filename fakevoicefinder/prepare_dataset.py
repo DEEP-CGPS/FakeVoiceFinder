@@ -70,13 +70,13 @@ class PrepareDataset:
         self.train_items: List[LabeledMember] = []
         self.test_items: List[LabeledMember] = []
 
-        # Transform params (tweak as needed)
+        # Transform params (defaults)
         self.sample_rate = 16000
         self.mel_params = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
         self.log_params = dict(n_fft=1024, hop_length=256, win_length=None)
-        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # NEW
+        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # DWT → 224x224 más abajo
 
-        # === MINIMAL CHANGE: allow optional overrides from cfg ===
+        # ---- Overrides opcionales desde cfg (cambio mínimo) ----
         user_mel = getattr(self.cfg, "mel_params", None)
         if isinstance(user_mel, dict) and user_mel:
             self.mel_params.update(user_mel)
@@ -88,9 +88,8 @@ class PrepareDataset:
         user_dwt = getattr(self.cfg, "dwt_params", None)
         if isinstance(user_dwt, dict) and user_dwt:
             self.dwt_params.update(user_dwt)
-        # === end overrides ===
 
-        # === MINIMAL CHANGE: optional clip length in seconds (default 3.0) ===
+        # Ventana de recorte/relleno (segundos). Default 3.0 si no se define.
         clip_val = getattr(self.cfg, "clip_seconds", None)
         try:
             cs = float(clip_val) if clip_val is not None else 3.0
@@ -99,7 +98,15 @@ class PrepareDataset:
         if not (cs > 0):
             cs = 3.0
         self.clip_seconds = cs
-        # === end clip ===
+
+        # Tamaño opcional de imagen para MEL/LOG (p. ej., 224 para ViT). None = no resize.
+        img_sz = getattr(self.cfg, "image_size", None)
+        try:
+            self.image_size = int(img_sz) if img_sz is not None else None
+        except Exception:
+            self.image_size = None
+        if self.image_size is not None and self.image_size <= 0:
+            self.image_size = None
 
     # 1) LOAD ----------------------------------------------------------------
 
@@ -230,7 +237,7 @@ class PrepareDataset:
         n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey)
         n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey)
 
-        # keep manifest params updated (includes clip_seconds now)
+        # Guardar hiperparámetros de la transformación en experiment.json
         self.update_experiment_json(tkey)
 
         return {"train": n_train, "test": n_test}
@@ -247,7 +254,7 @@ class PrepareDataset:
                     continue
                 y, sr = librosa.load(str(wav), sr=self.sample_rate, mono=True)
 
-                # === MINIMAL CHANGE: usar ventana configurable (default 3.0 s) ===
+                # Ventana configurable (default 3.0 s)
                 y = librosa.util.fix_length(y, size=int(sr * self.clip_seconds))
 
                 arr = self._apply_transform(y, sr, tkey)
@@ -295,7 +302,11 @@ class PrepareDataset:
                 fmax=self.mel_params["fmax"],
                 power=2.0,
             )
-            return librosa.power_to_db(S, ref=np.max)
+            out = librosa.power_to_db(S, ref=np.max)
+            # Resize opcional para ViT (224x224 si cfg.image_size=224)
+            if self.image_size:
+                out = self._resize_2d(out, self.image_size, self.image_size)
+            return out
 
         elif tkey == "log":
             D = librosa.stft(
@@ -305,7 +316,11 @@ class PrepareDataset:
                 win_length=self.log_params["win_length"],
             )
             amp = np.abs(D)
-            return librosa.amplitude_to_db(amp, ref=np.max)
+            out = librosa.amplitude_to_db(amp, ref=np.max)
+            # Resize opcional para ViT (224x224 si cfg.image_size=224)
+            if self.image_size:
+                out = self._resize_2d(out, self.image_size, self.image_size)
+            return out
 
         elif tkey == "dwt":
             # Escalograma DWT 2D (filas = [cA_L, cD_L, ..., cD_1]) + resize 224x224
@@ -326,7 +341,7 @@ class PrepareDataset:
 
             scalogram = np.stack(rows, axis=0)  # (niveles+1, ancho)
 
-            # 🔧 Paso clave: redimensionar para compatibilidad CNN/ViT
+            # Redimensionar para compatibilidad CNN/ViT (fijo 224x224 para DWT)
             TARGET_H, TARGET_W = 224, 224
             scalogram = self._resize_2d(scalogram, TARGET_H, TARGET_W)
 
@@ -351,8 +366,8 @@ class PrepareDataset:
         self.exp.update_manifest()
 
     def _params_for_transform(self, tkey: str) -> Dict[str, Any]:
-        # Include sample_rate and the chosen clip_seconds in every transform params
-        base = {"sample_rate": self.sample_rate, "clip_seconds": self.clip_seconds}
+        # Registrar sample_rate, ventana y image_size (si aplica) junto con los hiperparámetros del transform
+        base = {"sample_rate": self.sample_rate, "clip_seconds": self.clip_seconds, "image_size": self.image_size}
         if tkey == "mel":
             return {**base, **self.mel_params}
         if tkey == "log":
@@ -360,6 +375,7 @@ class PrepareDataset:
         if tkey == "dwt":
             return {**base, **self.dwt_params}
         return {}
+
 
 
 

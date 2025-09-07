@@ -122,7 +122,7 @@ class MetricsReporter:
         rep.plot_variants_for_model(df, model="resnet18", variant="pretrain",
                                     metric="f1", out_name="fig_resnet18_pretrain_f1.png")
         rep.plot_heatmap_models_transforms(df, metric="accuracy",
-                                           vmin=60, vmax=100, out_name="fig_heatmap_acc.png")
+                                           out_name="fig_heatmap_acc.png")
 
     Notes
     -----
@@ -348,10 +348,15 @@ class MetricsReporter:
         """
         Heatmap with rows = "model (variant)" and columns = transforms.
 
+        Changes requested:
+          - Color scale defaults to: vmin = worst observed value, vmax = 100.
+          - Colormap set to 'RdYlGn' (red = bad, green = good).
+          - Each cell shows its value as a percentage.
+
         Args:
             df: DataFrame from summarize()/evaluate_all()
             metric: "accuracy" or "f1"
-            vmin, vmax: Optional color scale range (percentages)
+            vmin, vmax: Optional explicit color range (percentages). If None, use the defaults above.
             out_name: Optional filename to save in reports/
         """
         mcol = metric.lower()
@@ -362,14 +367,47 @@ class MetricsReporter:
         tmp["row"] = tmp["model"].astype(str) + " (" + tmp["variant"].astype(str) + ")"
         pivot = tmp.pivot_table(index="row", columns="transform", values=mcol, aggfunc="max")
 
+        # Matrix of values (already in percentages from summarize())
+        A = pivot.to_numpy(dtype=float)
+
+        # Default color scaling
+        worst = float(np.nanmin(A)) if A.size else 0.0
+        vmin_eff = float(vmin) if vmin is not None else worst
+        vmax_eff = float(vmax) if vmax is not None else 100.0
+
         plt.figure(figsize=(12, 7))
-        im = plt.imshow(pivot.values, aspect="auto", interpolation="nearest", vmin=vmin, vmax=vmax)
-        plt.colorbar(im, label=f"{mcol.capitalize()} (%)")
+        im = plt.imshow(
+            A,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="RdYlGn",   # red -> bad, green -> good
+            vmin=vmin_eff,
+            vmax=vmax_eff,
+        )
+        cbar = plt.colorbar(im, label=f"{mcol.capitalize()} (%)")
+
+        # Axes / labels
         plt.yticks(range(len(pivot.index)), pivot.index)
         plt.xticks(range(len(pivot.columns)), pivot.columns, rotation=20, ha="right")
         plt.title(f"Models+variants × transforms — {mcol.capitalize()}")
-        plt.tight_layout()
 
+        # Annotate values inside cells, with auto-contrast text color
+        def _text_color(value: float) -> str:
+            r, g, b, _ = im.cmap(im.norm(value))
+            luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            return "black" if luminance > 0.5 else "white"
+
+        n_rows, n_cols = A.shape
+        for i in range(n_rows):
+            for j in range(n_cols):
+                val = A[i, j]
+                if np.isnan(val):
+                    plt.text(j, i, "—", ha="center", va="center", fontsize=10, color="gray")
+                else:
+                    plt.text(j, i, f"{val:.1f}%", ha="center", va="center",
+                             fontsize=10, color=_text_color(val))
+
+        plt.tight_layout()
         out = self._resolve_savepath(out_name=out_name, default_name=f"fig_heatmap_{mcol}.png")
         plt.savefig(out, dpi=150)
         plt.show()
