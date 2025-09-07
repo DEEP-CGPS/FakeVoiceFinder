@@ -44,6 +44,11 @@ class ExperimentConfig(ValidationMixin):
         # --- Transforms
         self.transform_list: List[str] = ["mel", "log"]
 
+        # --- (NEW) Optional overrides for transform hyperparameters
+        self.mel_params: Optional[Dict[str, Any]] = None
+        self.log_params: Optional[Dict[str, Any]] = None
+        self.dwt_params: Optional[Dict[str, Any]] = None
+
         # --- Training / Eval
         self.epochs: int = 20
         self.batch_size: int = 32

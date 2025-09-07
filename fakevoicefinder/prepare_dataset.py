@@ -26,9 +26,9 @@ import numpy as np
 try:
     import librosa
 except Exception as e:
-        raise RuntimeError(
-            "librosa is required for audio I/O and transforms. Install: pip install librosa soundfile"
-        ) from e
+    raise RuntimeError(
+        "librosa is required for audio I/O and transforms. Install: pip install librosa soundfile"
+    ) from e
 
 try:
     import pywt  # DWT
@@ -75,6 +75,20 @@ class PrepareDataset:
         self.mel_params = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
         self.log_params = dict(n_fft=1024, hop_length=256, win_length=None)
         self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # NEW
+
+        # === MINIMAL CHANGE: allow optional overrides from cfg ===
+        user_mel = getattr(self.cfg, "mel_params", None)
+        if isinstance(user_mel, dict) and user_mel:
+            self.mel_params.update(user_mel)
+
+        user_log = getattr(self.cfg, "log_params", None)
+        if isinstance(user_log, dict) and user_log:
+            self.log_params.update(user_log)
+
+        user_dwt = getattr(self.cfg, "dwt_params", None)
+        if isinstance(user_dwt, dict) and user_dwt:
+            self.dwt_params.update(user_dwt)
+        # === end overrides ===
 
     # 1) LOAD ----------------------------------------------------------------
 
@@ -204,6 +218,10 @@ class PrepareDataset:
 
         n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey)
         n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey)
+
+        # MINIMAL ADD: write transform hyperparameters to experiment.json
+        self.update_experiment_json(tkey)
+
         return {"train": n_train, "test": n_test}
 
     def _transform_split(self, orig_root: Path, out_root: Path, tkey: str) -> int:
@@ -329,4 +347,5 @@ class PrepareDataset:
         if tkey == "dwt":
             return dict(sample_rate=self.sample_rate, **self.dwt_params)
         return {}
+
 
