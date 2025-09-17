@@ -7,7 +7,7 @@ PrepareDataset (zip-only, manifest-driven counters):
     outputs/<EXP>/datasets/{train|test}/original/{reals|fakes}/<filename>.<ext>
 - Apply transforms ('mel', 'log', 'dwt') and save features as .npy under:
     outputs/<EXP>/datasets/<split>/transforms/<transform>/{real|fake}/<basename>.npy
-  * DWT se reescala a 224x224 para compatibilidad con CNN/ViT (AlexNet, VGG, ResNet, ViT).
+  * DWT se reescala al tamaño deseado (image_size o 224) para compatibilidad con CNN/ViT.
 - Update experiment.json:
     - Fill num_items for original_dataset (train/test).
     - Store transform params (light metadata).
@@ -74,7 +74,7 @@ class PrepareDataset:
         self.sample_rate = 16000
         self.mel_params = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
         self.log_params = dict(n_fft=1024, hop_length=256, win_length=None)
-        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # DWT → 224x224 más abajo
+        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # DWT → resize a image_size o 224
 
         # ---- Overrides opcionales desde cfg (cambio mínimo) ----
         user_mel = getattr(self.cfg, "mel_params", None)
@@ -99,7 +99,7 @@ class PrepareDataset:
             cs = 3.0
         self.clip_seconds = cs
 
-        # Tamaño opcional de imagen para MEL/LOG (p. ej., 224 para ViT). None = no resize.
+        # Tamaño opcional de imagen para MEL/LOG/DWT (p. ej., 224 para ViT). None = usa 224 en DWT y no resize en MEL/LOG.
         img_sz = getattr(self.cfg, "image_size", None)
         try:
             self.image_size = int(img_sz) if img_sz is not None else None
@@ -303,7 +303,7 @@ class PrepareDataset:
                 power=2.0,
             )
             out = librosa.power_to_db(S, ref=np.max)
-            # Resize opcional para ViT (224x224 si cfg.image_size=224)
+            # Resize opcional para ViT (image_size×image_size)
             if self.image_size:
                 out = self._resize_2d(out, self.image_size, self.image_size)
             return out
@@ -317,35 +317,43 @@ class PrepareDataset:
             )
             amp = np.abs(D)
             out = librosa.amplitude_to_db(amp, ref=np.max)
-            # Resize opcional para ViT (224x224 si cfg.image_size=224)
+            # Resize opcional para ViT (image_size×image_size)
             if self.image_size:
                 out = self._resize_2d(out, self.image_size, self.image_size)
             return out
 
         elif tkey == "dwt":
-            # Escalograma DWT 2D (filas = [cA_L, cD_L, ..., cD_1]) + resize 224x224
+            # Escalograma DWT 2D (filas = [cA_L, cD_L, ..., cD_1]) + log-dB + resize a (image_size o 224)
             wavelet = self.dwt_params.get("wavelet", "db4")
             level   = int(self.dwt_params.get("level", 4))
             mode    = self.dwt_params.get("mode", "symmetric")
 
-            coeffs = pywt.wavedec(y, wavelet=wavelet, level=level, mode=mode)  # [cA_L, cD_L, ..., cD_1]
-            coeffs_abs = [np.abs(c) for c in coeffs]
+            # Tamaño objetivo: usa image_size si está definido, si no 224.
+            target_size = int(self.image_size) if (self.image_size is not None) else 224
+            TARGET_H, TARGET_W = target_size, target_size
 
-            # Alinear longitudes: padding con ceros a la derecha
-            max_len = max(c.shape[-1] for c in coeffs_abs)
+            # Coeficientes: [cA_L, cD_L, ..., cD_1]
+            coeffs = pywt.wavedec(y, wavelet=wavelet, level=level, mode=mode)
+            coeffs_abs = [np.abs(c).astype(np.float32, copy=False) for c in coeffs]
+
+            # Re-muestrear cada banda directamente al ancho objetivo (evita bandas planas por padding)
+            x_new = np.linspace(0.0, 1.0, num=TARGET_W, dtype=np.float32)
             rows: List[np.ndarray] = []
             for c in coeffs_abs:
-                if c.shape[-1] < max_len:
-                    c = np.pad(c, (0, max_len - c.shape[-1]), mode="constant", constant_values=0)
-                rows.append(c.astype(np.float32))
+                if c.size == 0:
+                    rows.append(np.zeros(TARGET_W, dtype=np.float32))
+                    continue
+                x_old = np.linspace(0.0, 1.0, num=c.shape[-1], dtype=np.float32)
+                rows.append(np.interp(x_new, x_old, c).astype(np.float32))
+            scalogram = np.stack(rows, axis=0)  # (niveles+1, TARGET_W)
 
-            scalogram = np.stack(rows, axis=0)  # (niveles+1, ancho)
+            # Compresión log en dB (alineado con MEL/LOG); clamp por estabilidad
+            scalogram_db = librosa.amplitude_to_db(scalogram, ref=np.max, top_db=80.0)
 
-            # Redimensionar para compatibilidad CNN/ViT (fijo 224x224 para DWT)
-            TARGET_H, TARGET_W = 224, 224
-            scalogram = self._resize_2d(scalogram, TARGET_H, TARGET_W)
+            # Redimensionar altura al objetivo (ancho ya TARGET_W)
+            scalogram_db = self._resize_2d(scalogram_db, TARGET_H, TARGET_W)
 
-            return scalogram
+            return scalogram_db
 
         else:
             raise ValueError(f"Unsupported transform '{tkey}'.")

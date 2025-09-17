@@ -26,7 +26,7 @@ Key principles
 Dependencies
 ------------
 - numpy, pandas, matplotlib
-- scikit-learn (for F1 score only; you likely already have it)
+- scikit-learn (for metrics)
 """
 
 from __future__ import annotations
@@ -44,10 +44,15 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 try:
-    from sklearn.metrics import f1_score
+    from sklearn.metrics import (
+        f1_score,
+        precision_recall_fscore_support,
+        precision_score,
+        recall_score,
+    )
 except Exception as e:
     raise RuntimeError(
-        "scikit-learn is required for F1 score. Install: pip install scikit-learn"
+        "scikit-learn is required for metrics. Install: pip install scikit-learn"
     ) from e
 
 from .experiment import CreateExperiment
@@ -184,7 +189,9 @@ class MetricsReporter:
     def summarize(self) -> pd.DataFrame:
         """
         Build a DataFrame with one row per (model, variant, transform):
-            columns = ['model', 'variant', 'transform', 'accuracy', 'f1', 'checkpoint']
+            columns = ['model', 'variant', 'transform',
+                       'accuracy', 'f1', 'f1_macro', 'f1_micro', 'precision', 'recall',
+                       'checkpoint']
 
         Uses ONLY the **test** dataset of each transform.
         """
@@ -209,15 +216,19 @@ class MetricsReporter:
 
                     # Load model depending on variant
                     model = self._load_model_variant(ckpt_path, variant)
-                    acc, f1 = self._eval_metrics(model, loader)
+                    acc, f1_main, f1_macro, f1_micro, prec, rec = self._eval_metrics(model, loader)
 
                     rows.append(
                         {
                             "model": str(model_name),
                             "variant": str(variant),
                             "transform": str(transform),
-                            "accuracy": round(float(acc) * 100.0, 2),  # percentage
-                            "f1": round(float(f1) * 100.0, 2),        # percentage
+                            "accuracy": round(float(acc) * 100.0, 2),      # percentage
+                            "f1": round(float(f1_main) * 100.0, 2),        # percentage (binary w/ fallback)
+                            "f1_macro": round(float(f1_macro) * 100.0, 2), # percentage
+                            "f1_micro": round(float(f1_micro) * 100.0, 2), # percentage
+                            "precision": round(float(prec) * 100.0, 2),    # percentage (pos_label=1)
+                            "recall": round(float(rec) * 100.0, 2),        # percentage (pos_label=1)
                             "checkpoint": ckpt_rel,
                         }
                     )
@@ -248,13 +259,14 @@ class MetricsReporter:
         Args:
             df: DataFrame from summarize()/evaluate_all()
             transform: Transform name (e.g. "mel", "log")
-            metric: "accuracy" or "f1"
+            metric: one of {"accuracy","f1","f1_macro","f1_micro","precision","recall"}
             y_min, y_max: Optional Y-axis limits (percentages)
             out_name: Optional filename to save in reports/
         """
         mcol = metric.lower()
-        if mcol not in ("accuracy", "f1"):
-            raise ValueError("metric must be 'accuracy' or 'f1'.")
+        allowed = {"accuracy", "f1", "f1_macro", "f1_micro", "precision", "recall"}
+        if mcol not in allowed:
+            raise ValueError(f"metric must be one of {sorted(allowed)}.")
 
         sub = df[df["transform"].str.lower() == transform.lower()].copy()
         if sub.empty:
@@ -266,7 +278,7 @@ class MetricsReporter:
 
         plt.figure(figsize=(12, 5))
         bars = plt.bar(sub["label"], sub[mcol])
-        plt.ylabel(f"{mcol.capitalize()} (%)")
+        plt.ylabel(f"{mcol.replace('_', ' ').title()} (%)")
         plt.title(f"Architectures/variants — Transform: {transform}")
         if y_min is not None or y_max is not None:
             ymin = y_min if y_min is not None else plt.ylim()[0]
@@ -302,13 +314,14 @@ class MetricsReporter:
             df: DataFrame from summarize()/evaluate_all()
             model: Model name as appears in experiment.json
             variant: One of {"scratch","pretrain","usermodel_jit"}
-            metric: "accuracy" or "f1"
+            metric: one of {"accuracy","f1","f1_macro","f1_micro","precision","recall"}
             y_min, y_max: Optional Y-axis limits (percentages)
             out_name: Optional filename to save in reports/
         """
         mcol = metric.lower()
-        if mcol not in ("accuracy", "f1"):
-            raise ValueError("metric must be 'accuracy' or 'f1'.")
+        allowed = {"accuracy", "f1", "f1_macro", "f1_micro", "precision", "recall"}
+        if mcol not in allowed:
+            raise ValueError(f"metric must be one of {sorted(allowed)}.")
 
         sub = df[(df["model"].str.lower() == model.lower()) &
                  (df["variant"].str.lower() == variant.lower())].copy()
@@ -318,7 +331,7 @@ class MetricsReporter:
         sub = sub.sort_values(by="transform")
         plt.figure(figsize=(9, 4.5))
         bars = plt.bar(sub["transform"], sub[mcol])
-        plt.ylabel(f"{mcol.capitalize()} (%)")
+        plt.ylabel(f"{mcol.replace('_', ' ').title()} (%)")
         plt.title(f"{model} — variant: {variant}")
         if y_min is not None or y_max is not None:
             ymin = y_min if y_min is not None else plt.ylim()[0]
@@ -348,20 +361,21 @@ class MetricsReporter:
         """
         Heatmap with rows = "model (variant)" and columns = transforms.
 
-        Changes requested:
-          - Color scale defaults to: vmin = worst observed value, vmax = 100.
-          - Colormap set to 'RdYlGn' (red = bad, green = good).
+        Defaults:
+          - Color scale: vmin = worst observed value, vmax = 100.
+          - Colormap: 'RdYlGn' (red = bad, green = good).
           - Each cell shows its value as a percentage.
 
         Args:
             df: DataFrame from summarize()/evaluate_all()
-            metric: "accuracy" or "f1"
-            vmin, vmax: Optional explicit color range (percentages). If None, use the defaults above.
+            metric: one of {"accuracy","f1","f1_macro","f1_micro","precision","recall"}
+            vmin, vmax: Optional explicit color range (percentages).
             out_name: Optional filename to save in reports/
         """
         mcol = metric.lower()
-        if mcol not in ("accuracy", "f1"):
-            raise ValueError("metric must be 'accuracy' or 'f1'.")
+        allowed = {"accuracy", "f1", "f1_macro", "f1_micro", "precision", "recall"}
+        if mcol not in allowed:
+            raise ValueError(f"metric must be one of {sorted(allowed)}.")
 
         tmp = df.copy()
         tmp["row"] = tmp["model"].astype(str) + " (" + tmp["variant"].astype(str) + ")"
@@ -384,12 +398,12 @@ class MetricsReporter:
             vmin=vmin_eff,
             vmax=vmax_eff,
         )
-        cbar = plt.colorbar(im, label=f"{mcol.capitalize()} (%)")
+        plt.colorbar(im, label=f"{mcol.replace('_', ' ').title()} (%)")
 
         # Axes / labels
         plt.yticks(range(len(pivot.index)), pivot.index)
         plt.xticks(range(len(pivot.columns)), pivot.columns, rotation=20, ha="right")
-        plt.title(f"Models+variants × transforms — {mcol.capitalize()}")
+        plt.title(f"Models+variants × transforms — {mcol.replace('_', ' ').title()}")
 
         # Annotate values inside cells, with auto-contrast text color
         def _text_color(value: float) -> str:
@@ -457,12 +471,17 @@ class MetricsReporter:
         return torch.load(str(path), map_location=self.device, weights_only=False)
 
     @torch.no_grad()
-    def _eval_metrics(self, model, loader: DataLoader) -> Tuple[float, float]:
+    def _eval_metrics(self, model, loader: DataLoader) -> Tuple[float, float, float, float, float, float]:
         """
-        Compute accuracy and F1 on the provided DataLoader.
+        Compute accuracy and multiple F1 variants + precision/recall on the provided DataLoader.
 
         Returns:
-            (accuracy, f1) as floats in [0,1].
+            (accuracy,
+             f1_main,   # binary F1 (pos_label=1) if viable; otherwise weighted F1 as fallback
+             f1_macro,
+             f1_micro,
+             precision, # binary precision for pos_label=1
+             recall)    # binary recall    for pos_label=1
         """
         model.eval()
         all_preds: List[int] = []
@@ -481,16 +500,43 @@ class MetricsReporter:
             all_true.extend(y.detach().cpu().tolist())
 
         all_preds_arr = np.array(all_preds, dtype=np.int32)
-        all_true_arr = np.array(all_true, dtype=np.int32)
+        all_true_arr  = np.array(all_true,  dtype=np.int32)
 
+        # Accuracy estándar
         total = max(len(all_true_arr), 1)
         acc = float((all_preds_arr == all_true_arr).sum()) / float(total)
-        try:
-            f1 = float(f1_score(all_true_arr, all_preds_arr, average="binary"))
-        except Exception:
-            # Fallback if only one class present in predictions or ground-truth
-            f1 = 0.0
 
-        return acc, f1
+        # Presencia de clases en gt y pred
+        labels_true = set(np.unique(all_true_arr).tolist())
+        labels_pred = set(np.unique(all_preds_arr).tolist())
+        has_both_true = {0, 1}.issubset(labels_true)
+        has_pos_pred  = 1 in labels_pred
+
+        # F1 por clase (para fallback ponderado)
+        _, _, f1_per_class, support = precision_recall_fscore_support(
+            all_true_arr, all_preds_arr, labels=[0, 1], zero_division=0
+        )
+        support = np.asarray(support, dtype=np.float64)
+        if support.sum() > 0:
+            f1_weighted = float(np.average(f1_per_class, weights=support))
+        else:
+            f1_weighted = 0.0
+
+        # F1 principal (binario si es viable; si no, ponderado)
+        if has_both_true and has_pos_pred:
+            f1_main = float(f1_score(all_true_arr, all_preds_arr, average="binary", pos_label=1, zero_division=0))
+        else:
+            f1_main = f1_weighted
+
+        # Macro & Micro F1
+        f1_macro = float(f1_score(all_true_arr, all_preds_arr, average="macro", zero_division=0))
+        f1_micro = float(f1_score(all_true_arr, all_preds_arr, average="micro", zero_division=0))
+
+        # Precision/Recall binarios para la clase positiva = 1
+        precision = float(precision_score(all_true_arr, all_preds_arr, pos_label=1, zero_division=0))
+        recall    = float(recall_score(all_true_arr, all_preds_arr,    pos_label=1, zero_division=0))
+
+        return acc, f1_main, f1_macro, f1_micro, precision, recall
+
 
 

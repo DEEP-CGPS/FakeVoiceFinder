@@ -132,7 +132,7 @@ def _replace_final_layer_for_arch(model: nn.Module, arch: str, num_classes: int 
         model.classifier = nn.Linear(model.classifier.in_features, num_classes, bias=True)
         return model
 
-    if any(k in a for k in ["vgg", "alexnet", "mobilenet", "efficientnet"]):
+    if any(k in a for k in ["vgg", "alexnet", "mobilenet", "efficientnet", "convnext"]):
         if hasattr(model, "classifier") and isinstance(model, nn.Sequential):
             for i in range(len(model.classifier) - 1, -1, -1):
                 if isinstance(model.classifier[i], nn.Linear):
@@ -199,6 +199,10 @@ def _instantiate_torchvision(arch: str, pretrained: bool) -> nn.Module:
         "vit_b_16": "vit_b_16",
         "googlenet": "googlenet",
         "inception_v3": "inception_v3",
+        # ---- NEW: ConvNeXt family ----
+        "convnext_tiny": "convnext_tiny",
+        "convnext_small": "convnext_small",
+        "convnext_base": "convnext_base",
     }
     key = name.replace("-", "_").replace(" ", "_")
     fn_name = name_map.get(key)
@@ -216,6 +220,7 @@ def _instantiate_torchvision(arch: str, pretrained: bool) -> nn.Module:
         else:
             return fn(weights=None, **extra_kwargs)
     except TypeError:
+        # Backward compatibility for older torchvision (< 0.13)
         return fn(pretrained=bool(pretrained), **extra_kwargs)
 
 
