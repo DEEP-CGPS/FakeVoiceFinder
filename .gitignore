@@ -17,3 +17,13 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 Thumbs.db
+
+# envs
+venv/
+venvtest/
+build/
+env/
+
+
+#other
+FakeVoiceFinder.egg-info/
