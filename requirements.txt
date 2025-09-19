@@ -1,0 +1,9 @@
+numpy
+pandas
+matplotlib
+scikit-learn
+librosa
+pywavelets
+pillow
+torch>=2.5,<3.0
+torchvision>=0.20,<1.0
