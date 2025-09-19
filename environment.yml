@@ -1,4 +1,4 @@
-name: fakevoice
+name: fakevoicetest
 channels:
   - conda-forge
   - defaults

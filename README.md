@@ -104,6 +104,9 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
-See the [official PyTorch installation guide](https://pytorch.org/get-started/locally/) for other CUDA/ROCm options.
+⚠️ **If installation fails**, try forcing a reinstall with:
+```bash
+pip install --upgrade --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
+```
 
----
+See the [official PyTorch installation guide](https://pytorch.org/get-started/locally/) for other CUDA/ROCm options.
