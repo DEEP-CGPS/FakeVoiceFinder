@@ -7,66 +7,87 @@ It provides tools to load models, prepare audio datasets, apply transformations,
 
 ## 🚀 Installation
 
-### 1. Clone the repository
+You can set up the environment either with **Conda** or with **pip + virtualenv**.  
+
+---
+
+### 🔹 Option 1: Using Conda
+1. Clone the repository:
 ```bash
 git clone https://github.com/DEEP-CGPS/FakeVoiceFinder.git
 cd FakeVoiceFinder
 ```
 
-### 2. Create a virtual environment (recommended)
+2. Create the Conda environment:
 ```bash
-python -m venv venv
+conda env create -f environment.yml
 ```
 
-This will create a folder called `venv` inside your project.
+3. Activate the environment:
+```bash
+conda activate fakevoice
+```
+
+4. Install PyTorch and Torchvision according to your hardware (see section below).
 
 ---
 
-## ▶️ Activating the environment
+### 🔹 Option 2: Using pip + virtualenv
+1. Clone the repository:
+```bash
+git clone https://github.com/DEEP-CGPS/FakeVoiceFinder.git
+cd FakeVoiceFinder
+```
 
-The activation command depends on your operating system and terminal:
+2. Create a virtual environment:
+```bash
+python -m venv venvtest
+```
 
-### 🔹 Windows
+3. Activate the environment:
 
-- **PowerShell** (default in VS Code):
+- **PowerShell (default in VS Code):**
   ```powershell
-  .\venv\Scripts\Activate.ps1
+  .\venvtest\Scripts\Activate.ps1
   ```
-  ⚠️ If you see the error *"execution of scripts is disabled"*, run the following command **once** in PowerShell (as Administrator):
+  ⚠️ If you see *“execution of scripts is disabled”*, run this once as Administrator:
   ```powershell
   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
   ```
-  Then try activation again.
 
-- **CMD (Command Prompt)**:
+- **CMD (Command Prompt):**
   ```cmd
-  venv\Scripts\activate.bat
+  venvtest\Scripts\activate.bat
   ```
 
-- **Git Bash**:
+- **Git Bash:**
   ```bash
-  source venv/Scripts/activate
+  source venvtest/Scripts/activate
   ```
 
-### 🔹 Linux / macOS
-```bash
-source venv/bin/activate
-```
+- **Linux / macOS:**
+  ```bash
+  source venvtest/bin/activate
+  ```
 
-When the environment is active, your terminal prompt will look like this:
+When activated, your prompt will look like:
 ```
 (venvtest) PS C:\Users\YourUser\FakeVoiceFinder>
 ```
 
----
-
-### 3. Install the library
+4. Install the requirements:
 ```bash
-pip install .
+pip install -r requirements.txt
 ```
 
-### 4. Install PyTorch and Torchvision
-**PyTorch is not included in the default installation**. This is intentional, so you can install the correct version depending on your hardware.
+5. Install PyTorch and Torchvision according to your hardware (see section below).
+
+---
+
+## 🔹 Installing PyTorch and Torchvision
+
+**PyTorch is not included by default** in the environment files.  
+Please install it manually according to your setup:
 
 - **CPU only (portable and recommended if you don’t have an NVIDIA GPU):**
 ```bash
