@@ -1,10 +1,10 @@
 # prepare_dataset.py
 """
 PrepareDataset (zip-only, manifest-driven counters):
-- Read TWO zips from cfg.data_path (reals.zip and fakes.zip).
+- Read TWO zips from cfg.data_path (real.zip and fake.zip).
 - Stratified split (scikit-learn).
 - Extract selected originals into the experiment:
-    outputs/<EXP>/datasets/{train|test}/original/{reals|fakes}/<filename>.<ext>
+    outputs/<EXP>/datasets/{train|test}/original/{real|fake}/<filename>.<ext>
 - Apply transforms ('mel', 'log', 'dwt') and save features as .npy under:
     outputs/<EXP>/datasets/<split>/transforms/<transform>/{real|fake}/<basename>.npy
   * DWT se reescala al tamaño deseado (image_size o 224) para compatibilidad con CNN/ViT.
@@ -45,7 +45,7 @@ AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
 # Types
 ZipMember = Tuple[Path, str]            # (zip_path, member_name)
-LabeledMember = Tuple[ZipMember, int]   # ((zip_path, member), label_int) — 0=reals, 1=fakes
+LabeledMember = Tuple[ZipMember, int]   # ((zip_path, member), label_int) — 0=real, 1=fake
 
 
 class PrepareDataset:
@@ -61,8 +61,8 @@ class PrepareDataset:
 
         # Zips expected under cfg.data_path
         data_root = Path(self.cfg.data_path)
-        self.reals_zip = data_root / self.cfg.reals_zip
-        self.fakes_zip = data_root / self.cfg.fakes_zip
+        self.real_zip = data_root / self.cfg.real_zip
+        self.fake_zip = data_root / self.cfg.fake_zip
 
         # Pools and splits
         self._real_members: List[ZipMember] = []
@@ -111,15 +111,15 @@ class PrepareDataset:
     # 1) LOAD ----------------------------------------------------------------
 
     def load_data(self) -> Dict[str, int]:
-        """Scan reals.zip and fakes.zip; build member lists."""
-        if not self.reals_zip.is_file():
-            raise ConfigError(f"Missing reals zip: {self.reals_zip}")
-        if not self.fakes_zip.is_file():
-            raise ConfigError(f"Missing fakes zip: {self.fakes_zip}")
+        """Scan real.zip and fake.zip; build member lists."""
+        if not self.real_zip.is_file():
+            raise ConfigError(f"Missing real zip: {self.real_zip}")
+        if not self.fake_zip.is_file():
+            raise ConfigError(f"Missing fake zip: {self.fake_zip}")
 
-        self._real_members = self._scan_zip(self.reals_zip)
-        self._fake_members = self._scan_zip(self.fakes_zip)
-        return {"reals": len(self._real_members), "fakes": len(self._fake_members)}
+        self._real_members = self._scan_zip(self.real_zip)
+        self._fake_members = self._scan_zip(self.fake_zip)
+        return {"real": len(self._real_members), "fake": len(self._fake_members)}
 
     def _scan_zip(self, zip_path: Path) -> List[ZipMember]:
         out: List[ZipMember] = []
@@ -147,7 +147,7 @@ class PrepareDataset:
         real = list(self._real_members)
         fake = list(self._fake_members)
         if not real or not fake:
-            raise ConfigError("Both reals.zip and fakes.zip must contain at least one audio file.")
+            raise ConfigError("Both real.zip and fake.zip must contain at least one audio file.")
 
         items: List[ZipMember] = real + fake
         labels: List[int] = [0] * len(real) + [1] * len(fake)
@@ -161,10 +161,10 @@ class PrepareDataset:
         self.test_items = list(zip(x_test, y_test))
 
         return {
-            "train": {"total": len(self.train_items), "reals": sum(1 for _, y in self.train_items if y == 0),
-                      "fakes": sum(1 for _, y in self.train_items if y == 1)},
-            "test":  {"total": len(self.test_items),  "reals": sum(1 for _, y in self.test_items  if y == 0),
-                      "fakes": sum(1 for _, y in self.test_items  if y == 1)},
+            "train": {"total": len(self.train_items), "real": sum(1 for _, y in self.train_items if y == 0),
+                      "fake": sum(1 for _, y in self.train_items if y == 1)},
+            "test":  {"total": len(self.test_items),  "real": sum(1 for _, y in self.test_items  if y == 0),
+                      "fake": sum(1 for _, y in self.test_items  if y == 1)},
         }
 
     # 3) SAVE ORIGINALS ------------------------------------------------------
@@ -173,10 +173,10 @@ class PrepareDataset:
         """Extract selected members to experiment/original folders, preserving filenames."""
         out_train = self.exp.train_orig
         out_test  = self.exp.test_orig
-        (out_train / "reals").mkdir(parents=True, exist_ok=True)
-        (out_train / "fakes").mkdir(parents=True, exist_ok=True)
-        (out_test  / "reals").mkdir(parents=True, exist_ok=True)
-        (out_test  / "fakes").mkdir(parents=True, exist_ok=True)
+        (out_train / "real").mkdir(parents=True, exist_ok=True)
+        (out_train / "fake").mkdir(parents=True, exist_ok=True)
+        (out_test  / "real").mkdir(parents=True, exist_ok=True)
+        (out_test  / "fake").mkdir(parents=True, exist_ok=True)
 
         n_train = self._extract_members(self.train_items, out_train)
         n_test  = self._extract_members(self.test_items,  out_test)
@@ -191,10 +191,10 @@ class PrepareDataset:
         return {"train": n_train, "test": n_test}
 
     def _extract_members(self, items: List[LabeledMember], dst_root: Path) -> int:
-        """Extract zip members into dst_root/{reals|fakes}/<filename> (preserve names)."""
+        """Extract zip members into dst_root/{real|fake}/<filename> (preserve names)."""
         n = 0
         for (zip_path, member), label in items:
-            cls = "reals" if label == 0 else "fakes"
+            cls = "real" if label == 0 else "fake"
             out_path = dst_root / cls / Path(member).name
             if out_path.exists():
                 n += 1
@@ -209,9 +209,9 @@ class PrepareDataset:
         return n
 
     def _count_audio_files_in(self, root: Path) -> int:
-        """Count audio files under {reals,fakes} folders."""
+        """Count audio files under {real,fake} folders."""
         cnt = 0
-        for sub in ("reals", "fakes"):
+        for sub in ("real", "fake"):
             d = root / sub
             if not d.exists():
                 continue
@@ -243,9 +243,9 @@ class PrepareDataset:
         return {"train": n_train, "test": n_test}
 
     def _transform_split(self, orig_root: Path, out_root: Path, tkey: str) -> int:
-        """Read audios from orig_root/{reals|fakes} and write arrays to out_root/{real|fake}."""
+        """Read audios from orig_root/{real|fake} and write arrays to out_root/{real|fake}."""
         n = 0
-        for src_cls, dst_cls in (("reals", "real"), ("fakes", "fake")):
+        for src_cls, dst_cls in (("real", "real"), ("fake", "fake")):
             src_dir = orig_root / src_cls
             if not src_dir.exists():
                 continue

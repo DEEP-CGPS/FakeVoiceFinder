@@ -1,7 +1,7 @@
 # fakevoicefinder/duration_probe.py
 """
 Utilidad opcional para inspeccionar la duración de audios en los ZIPs
-(reals.zip y fakes.zip) y obtener la duración mínima en segundos.
+(real.zip y fake.zip) y obtener la duración mínima en segundos.
 
 Uso típico en notebook:
     from fakevoicefinder.duration_probe import shortest_audio_seconds
@@ -13,8 +13,8 @@ Uso típico en notebook:
     # O pasando rutas directamente:
     min_sec = shortest_audio_seconds(
         data_path="../dataset",
-        reals_zip="reals.zip",
-        fakes_zip="fakes.zip",
+        real_zip="real.zip",
+        fake_zip="fake.zip",
     )
 
 Notas:
@@ -116,15 +116,15 @@ def shortest_audio_seconds(
     cfg: Optional[object] = None,
     *,
     data_path: Optional[str | Path] = None,
-    reals_zip: Optional[str | Path] = None,
-    fakes_zip: Optional[str | Path] = None,
+    real_zip: Optional[str | Path] = None,
+    fake_zip: Optional[str | Path] = None,
 ) -> float:
     """
     Retorna la duración (en segundos) del audio más corto encontrado en los ZIPs.
 
     Puedes pasar:
-      - cfg con atributos: cfg.data_path, cfg.reals_zip, cfg.fakes_zip
-      - o bien data_path/reals_zip/fakes_zip directamente (kwargs)
+      - cfg con atributos: cfg.data_path, cfg.real_zip, cfg.fake_zip
+      - o bien data_path/real_zip/fake_zip directamente (kwargs)
 
     Raises:
       FileNotFoundError si no encuentra los zips.
@@ -132,19 +132,19 @@ def shortest_audio_seconds(
     """
     if cfg is not None:
         data_root = Path(getattr(cfg, "data_path"))
-        rz = data_root / getattr(cfg, "reals_zip")
-        fz = data_root / getattr(cfg, "fakes_zip")
+        rz = data_root / getattr(cfg, "real_zip")
+        fz = data_root / getattr(cfg, "fake_zip")
     else:
-        if data_path is None or reals_zip is None or fakes_zip is None:
-            raise ValueError("Provee cfg o (data_path, reals_zip, fakes_zip).")
+        if data_path is None or real_zip is None or fake_zip is None:
+            raise ValueError("Provee cfg o (data_path, real_zip, fake_zip).")
         data_root = Path(data_path)
-        rz = data_root / reals_zip
-        fz = data_root / fakes_zip
+        rz = data_root / real_zip
+        fz = data_root / fake_zip
 
     if not rz.is_file():
-        raise FileNotFoundError(f"reals zip no encontrado: {rz}")
+        raise FileNotFoundError(f"real zip no encontrado: {rz}")
     if not fz.is_file():
-        raise FileNotFoundError(f"fakes zip no encontrado: {fz}")
+        raise FileNotFoundError(f"fake zip no encontrado: {fz}")
 
     min_dur = np.inf
     found_any = False

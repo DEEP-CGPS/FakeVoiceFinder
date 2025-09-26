@@ -69,8 +69,8 @@ class ExperimentConfig(ValidationMixin):
         self.run_name: Optional[str] = None
 
         # --- Data files (inside data_path)
-        self.reals_zip: str = "reals.zip"
-        self.fakes_zip: str = "fakes.zip"
+        self.real_zip: str = "real.zip"
+        self.fake_zip: str = "fake.zip"
 
         # --- (NEW) Optional clip window (seconds). If None, defaults to 3.0s in PrepareDataset
         self.clip_seconds: Optional[float] = None

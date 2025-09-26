@@ -19,8 +19,8 @@ Expected subclass attributes (ExperimentConfig provides these):
     num_workers: int
     eval_metric: list[str]
     device: str
-    reals_zip: str
-    fakes_zip: str
+    real_zip: str
+    fake_zip: str
 
 Allowed sets can be overridden by the subclass as attributes:
     ALLOWED_TYPE_TRAIN, ALLOWED_DEVICE, ALLOWED_OPTIM,
@@ -120,12 +120,12 @@ class ValidationMixin:
 
     def _check_data_presence(self) -> None:
         data = Path(self.data_path)
-        reals = data / self.reals_zip
-        fakes = data / self.fakes_zip
-        if not reals.is_file():
-            raise ConfigError(f"Missing '{self.reals_zip}' in '{data}'.")
-        if not fakes.is_file():
-            raise ConfigError(f"Missing '{self.fakes_zip}' in '{data}'.")
+        real = data / self.real_zip
+        fake = data / self.fake_zip
+        if not real.is_file():
+            raise ConfigError(f"Missing '{self.real_zip}' in '{data}'.")
+        if not fake.is_file():
+            raise ConfigError(f"Missing '{self.fake_zip}' in '{data}'.")
 
     def _check_lists(self) -> None:
         if not getattr(self, "transform_list", None):

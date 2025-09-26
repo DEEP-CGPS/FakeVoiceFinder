@@ -201,7 +201,7 @@ class CreateExperiment:
         One-liner data preparation pipeline.
 
         Steps:
-            1) Load ZIP members from cfg.data_path (reals.zip, fakes.zip).
+            1) Load ZIP members from cfg.data_path (real.zip, fake.zip).
             2) Stratified split (train_ratio, seed).
             3) Save originals into the experiment folder (and update num_items).
             4) Apply transforms (if provided or from cfg.transform_list) and update manifest.

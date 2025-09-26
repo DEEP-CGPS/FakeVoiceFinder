@@ -19,10 +19,10 @@ Supported model variants
 Data expectations
 -----------------
 Prepared datasets must exist under:
-  outputs/<EXP>/datasets/{train|test}/transforms/<transform>/{reals|fakes}/*.npy
+  outputs/<EXP>/datasets/{train|test}/transforms/<transform>/{real|fake}/*.npy
 
 Each `.npy` contains an array of shape [H, W] or [C, H, W], where C ∈ {1, 3}.
-Labels: reals→0, fakes→1 (also accepts folders "real"/"fake").
+Labels: real→0, fake→1 (also accepts folders "real"/"fake").
 
 Manifest update
 ---------------
@@ -52,7 +52,7 @@ from .model_loader import _safe_filename
 
 # ----------------------- Dataset -----------------------
 
-_CLASS_DIRS = [("reals", 0), ("real", 0), ("fakes", 1), ("fake", 1)]
+_CLASS_DIRS = [("real", 0), ("real", 0), ("fake", 1), ("fake", 1)]
 
 
 class NpyFolderDataset(Dataset):
@@ -70,7 +70,7 @@ class NpyFolderDataset(Dataset):
                     self.items.append((p, label))
 
         if not self.items:
-            raise RuntimeError(f"No .npy files found under {self.root} (expected 'reals'/'fakes').")
+            raise RuntimeError(f"No .npy files found under {self.root} (expected 'real'/'fake').")
 
     def __len__(self) -> int:
         return len(self.items)
@@ -269,7 +269,7 @@ class Trainer:
             (acc, cm) where cm is:
                 [[TN, FP],
                  [FN, TP]]
-            with class 0 = 'reals', class 1 = 'fakes'.
+            with class 0 = 'real', class 1 = 'fake'.
         """
         model.eval()
         y_true_list, y_pred_list = [], []

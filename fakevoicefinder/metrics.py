@@ -62,7 +62,7 @@ from .experiment import CreateExperiment
 # Dataset to read test .npy features saved by the data preparation step
 # ---------------------------------------------------------------------
 
-_CLASS_DIRS = [("reals", 0), ("real", 0), ("fakes", 1), ("fake", 1)]
+_CLASS_DIRS = [("real", 0), ("real", 0), ("fake", 1), ("fake", 1)]
 
 
 class NpyFolderDataset(Dataset):
@@ -70,7 +70,7 @@ class NpyFolderDataset(Dataset):
     Minimal dataset for .npy spectrogram tensors saved under class folders.
 
     Expected folder structure:
-        <root>/<class>/*.npy, where <class> in {'reals','fakes'} (or 'real','fake').
+        <root>/<class>/*.npy, where <class> in {'real','fake'} (or 'real','fake').
 
     Each .npy must be 2D ([H, W]) or 3D ([C, H, W]) with C in {1,3}.
     """
@@ -87,7 +87,7 @@ class NpyFolderDataset(Dataset):
                     self.items.append((p, label))
 
         if not self.items:
-            raise RuntimeError(f"No .npy files found under {self.root} (expected 'reals'/'fakes').")
+            raise RuntimeError(f"No .npy files found under {self.root} (expected 'real'/'fake').")
 
     def __len__(self) -> int:
         return len(self.items)
