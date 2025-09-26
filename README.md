@@ -1,7 +1,7 @@
 # FakeVoiceFinder 🎙️🔍
 
 **FakeVoiceFinder** is a Python library for the **detection and analysis of synthetic voices (fake voices / deepfakes)**.  
-It provides tools to load models, prepare audio datasets, apply transformations, and evaluate results.
+It provides tools to load models, train models, prepare audio datasets, apply transformations, and evaluate results.
 
 ---
 
