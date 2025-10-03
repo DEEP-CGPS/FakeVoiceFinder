@@ -9,6 +9,7 @@ from .duration_probe import shortest_audio_seconds
 
 # NEW: metrics reporter
 from .metrics import MetricsReporter
+from .inference import InferenceRunner, FakeProbabilityGauge  
 
 __all__ = [
     "ExperimentConfig",
@@ -19,4 +20,6 @@ __all__ = [
     "Trainer",
     "MetricsReporter",
     "shortest_audio_seconds",
+    "InferenceRunner",
+    "FakeProbabilityGauge",
 ]
