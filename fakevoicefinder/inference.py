@@ -38,6 +38,10 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Any
 from pathlib import Path
+from typing import Iterable, Tuple  # nuevos tipos
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.transforms as mtransforms
 
 import numpy as np
 import torch
@@ -269,12 +273,6 @@ class InferenceRunner:
 
 
 # ======================== ADDED: Visualization helper ========================
-
-# (solo añadidos, no modifican lo anterior)
-from typing import Iterable, Tuple  # nuevos tipos
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-import matplotlib.transforms as mtransforms
 
 
 class FakeProbabilityGauge:
