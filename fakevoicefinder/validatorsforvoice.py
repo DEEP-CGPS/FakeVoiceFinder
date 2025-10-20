@@ -1,3 +1,4 @@
+# validatorsforvoice.py
 """Validation mixin for the forvoice project (Fake Or Real Voice).
 
 Simple design:
@@ -90,9 +91,17 @@ class ValidationMixin:
 
     # -------- Checks --------
     def _check_paths(self, *, create_dirs: bool) -> None:
-        # Always keep outputs under the repository root
+        # Always keep outputs under the repository root (unless cfg.outputs_path is provided)
         repo_root = Path(__file__).resolve().parents[1]  # parent of 'forvoice'
-        outputs = repo_root / "outputs"
+
+        # ---- MINIMAL CHANGE: honor cfg.outputs_path if present ----
+        outputs_cfg = getattr(self, "outputs_path", None)
+        if outputs_cfg:
+            out_path = Path(outputs_cfg)
+            outputs = out_path if out_path.is_absolute() else (repo_root / out_path)
+        else:
+            outputs = repo_root / "outputs"
+        # -----------------------------------------------------------
 
         models = Path(self.models_path)
         data = Path(self.data_path)

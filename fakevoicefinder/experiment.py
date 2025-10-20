@@ -1,9 +1,10 @@
+# experiment.py
 """
 CreateExperiment: prepare an experiment folder and a lightweight manifest.
 
 What's included
 ---------------
-- Always builds under: <repo_root>/outputs/<experiment_slug>/
+- Always builds under: <repo_root>/outputs/<experiment_slug/>
 - Stores ONLY repo-relative paths in experiment.json (portable)
   e.g., "outputs/exp_demo/datasets/train/transforms/mel"
 - `original_dataset.path` points INSIDE the experiment:
@@ -45,9 +46,15 @@ class CreateExperiment:
         self.exp_name = self._require_name(experiment_name or getattr(cfg, "run_name", None))
         self.slug = self._slugify(self.exp_name)
 
-        # Repo root and outputs base (fixed)
+        # Repo root and outputs base (now configurable via cfg.outputs_path)
         self.repo_root = Path(__file__).resolve().parents[1]  # parent of package root
-        outputs_base = self.repo_root / "outputs"
+
+        outputs_cfg = getattr(self.cfg, "outputs_path", None)
+        if outputs_cfg:
+            out_path = Path(outputs_cfg)
+            outputs_base = out_path if out_path.is_absolute() else (self.repo_root / out_path)
+        else:
+            outputs_base = self.repo_root / "outputs"
         outputs_base.mkdir(parents=True, exist_ok=True)
 
         # Experiment root under outputs/
