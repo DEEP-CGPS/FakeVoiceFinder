@@ -1,28 +1,28 @@
 # fakevoicefinder/duration_probe.py
 """
-Utilidad opcional para inspeccionar la duración de audios en los ZIPs
-(real.zip y fake.zip) y obtener la duración mínima en segundos.
+Optional utility to inspect the audio duration inside the ZIP files
+(`real.zip` and `fake.zip`) and return the shortest duration in seconds.
 
-Uso típico en notebook:
+Typical usage in a notebook:
     from fakevoicefinder.duration_probe import shortest_audio_seconds
 
-    # Vía cfg (recomendado)
+    # Using an experiment config (recommended):
     min_sec = shortest_audio_seconds(cfg)
-    print("Duración mínima (s):", min_sec)
+    print("Shortest duration (s):", min_sec)
 
-    # O pasando rutas directamente:
+    # Or passing paths directly:
     min_sec = shortest_audio_seconds(
         data_path="../dataset",
         real_zip="real.zip",
         fake_zip="fake.zip",
     )
 
-Notas:
-- Lee los audios directamente desde los ZIPs.
-- Intenta primero leer encabezados con soundfile (rápido).
-- Si el formato no está soportado por soundfile (p. ej., MP3), hace fallback
-  a librosa escribiendo un temporal.
-- No modifica nada del experimento: es solo consulta.
+Notes:
+- Reads audio files directly from the ZIPs, without unpacking the whole dataset.
+- Tries to read headers with `soundfile` first (fast for WAV/FLAC/OGG, etc.).
+- If the format is not supported by `soundfile` (e.g. MP3/M4A), it falls back
+  to `librosa` by writing a temporary file.
+- This function never modifies the experiment state; it only inspects durations.
 """
 from __future__ import annotations
 
@@ -36,14 +36,14 @@ from typing import Iterable, Optional
 import numpy as np
 
 try:
-    import soundfile as sf  # lectura rápida de encabezados (WAV/FLAC/OGG, etc.)
+    import soundfile as sf  # fast header-based duration for WAV/FLAC/OGG, etc.
 except Exception as e:
     raise RuntimeError(
         "duration_probe requiere 'soundfile'. Instala: pip install soundfile"
     ) from e
 
 try:
-    import librosa  # fallback para formatos no soportados por soundfile (p. ej., MP3/M4A)
+    import librosa  # fallback for formats not supported by soundfile (e.g. MP3/M4A)
 except Exception as e:
     raise RuntimeError(
         "duration_probe requiere 'librosa'. Instala: pip install librosa"
@@ -54,7 +54,7 @@ AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
 
 def _iter_audio_members(zip_path: Path) -> Iterable[str]:
-    """Devuelve nombres de miembros de audio dentro del zip."""
+    """Yield audio member names found inside the given ZIP file."""
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
             if info.is_dir():
@@ -64,7 +64,7 @@ def _iter_audio_members(zip_path: Path) -> Iterable[str]:
 
 
 def _duration_via_soundfile(bytes_data: bytes) -> Optional[float]:
-    """Duración (s) leyendo encabezado con soundfile. None si formato no soportado."""
+    """Return duration in seconds using soundfile, or None if unsupported."""
     bio = io.BytesIO(bytes_data)
     try:
         with sf.SoundFile(bio) as f:
@@ -78,7 +78,7 @@ def _duration_via_soundfile(bytes_data: bytes) -> Optional[float]:
 
 
 def _duration_via_librosa_tmp(bytes_data: bytes, suffix: str) -> Optional[float]:
-    """Duración (s) con librosa mediante archivo temporal (para MP3/M4A, etc.)."""
+    """Return duration in seconds using librosa and a temporary file."""
     tmp = None
     try:
         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
@@ -97,18 +97,18 @@ def _duration_via_librosa_tmp(bytes_data: bytes, suffix: str) -> Optional[float]
 
 
 def _duration_from_zip_member(zip_path: Path, member_name: str) -> Optional[float]:
-    """Obtiene duración (s) de un miembro de audio dentro del zip."""
+    """Compute the duration (in seconds) of a single audio file inside a ZIP."""
     suffix = Path(member_name).suffix.lower()
     with zipfile.ZipFile(zip_path, "r") as zf:
         with zf.open(member_name) as fp:
             data = fp.read()
 
-    # 1) Intento rápido con soundfile
+    # 1) Try fast path with soundfile.
     dur = _duration_via_soundfile(data)
     if dur is not None:
         return dur
 
-    # 2) Fallback con librosa (temporal) para formatos no soportados
+    # 2) Fallback with librosa for formats not supported by soundfile.
     return _duration_via_librosa_tmp(data, suffix=suffix)
 
 
@@ -120,15 +120,16 @@ def shortest_audio_seconds(
     fake_zip: Optional[str | Path] = None,
 ) -> float:
     """
-    Retorna la duración (en segundos) del audio más corto encontrado en los ZIPs.
+    Return the shortest audio duration (in seconds) found in the ZIP files.
 
-    Puedes pasar:
-      - cfg con atributos: cfg.data_path, cfg.real_zip, cfg.fake_zip
-      - o bien data_path/real_zip/fake_zip directamente (kwargs)
+    You can provide:
+      - an experiment-like object (`cfg`) with attributes: `data_path`,
+        `real_zip`, `fake_zip`; or
+      - the explicit paths via keyword arguments.
 
     Raises:
-      FileNotFoundError si no encuentra los zips.
-      ValueError si no hay audios válidos o no se pudo calcular ninguna duración.
+      FileNotFoundError: if any of the ZIPs cannot be found.
+      ValueError: if no valid audio duration could be computed.
     """
     if cfg is not None:
         data_root = Path(getattr(cfg, "data_path"))
@@ -149,7 +150,7 @@ def shortest_audio_seconds(
     min_dur = np.inf
     found_any = False
 
-    # Escanear ambos zips
+    # Scan both ZIP files.
     for zip_path in (rz, fz):
         for member in _iter_audio_members(zip_path):
             dur = _duration_from_zip_member(zip_path, member)

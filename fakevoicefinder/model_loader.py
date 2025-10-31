@@ -1,25 +1,37 @@
 """
-model_loader.py — Load/prepare models for fakevoicefinder.
+model_loader.py — Load and prepare models for FakeVoiceFinder.
 
-User models policy (simplified)
--------------------------------
-- ONLY TorchScript is supported for user models.
-- Place TorchScript archive(s) (created via `torch.jit.save`) under `../models/`.
-- We load them with `torch.jit.load` and re-save them (unchanged) into:
+What this module does
+---------------------
+- Creates ready-to-train **benchmark** models from torchvision with 2 output
+  classes (real/fake).
+- Discovers and registers **user** models, but only when they are provided as
+  TorchScript archives.
+
+User models (TorchScript-only)
+------------------------------
+- Only TorchScript is accepted for user-provided models.
+- Put your TorchScript file(s) (exported with `torch.jit.save`) under
+  `../models/`.
+- Each valid file is loaded with `torch.jit.load` and re-saved **unchanged** to:
     outputs/<EXP>/models/loaded/<basename>_usermodel_jit.pt
-- The manifest (experiment.json) records ONLY `loaded_variants["usermodel_jit"]`.
+- The experiment manifest (`experiment.json`) records these under
+  `loaded_variants["usermodel_jit"]`.
 
-Benchmark models
-----------------
-- Torchvision architectures: 'scratch' / 'pretrain'.
-- We adapt input channels (if needed) and replace the final classifier with 2 outputs.
-- We **DO NOT** append Softmax here; the trainer will append Softmax when saving
-  the best-trained checkpoint for inference.
-- Saved as PICKLED `nn.Module` (extension `.pt`) into outputs/<EXP>/models/loaded/.
+Benchmark models (torchvision)
+------------------------------
+- For each model name in `cfg.models_list`, we can build:
+    - a "scratch" version (random init)
+    - a "pretrain" version (ImageNet weights, when available)
+- We adjust the first conv layer when the experiment requests 1-channel inputs.
+- We replace the final classifier/head so it outputs **2** classes.
+- We **do not** add Softmax here; the trainer will handle that on export.
+- These are stored as **pickled** `nn.Module` objects under:
+    outputs/<EXP>/models/loaded/
 
 Security note
 -------------
-Loading pickled nn.Module requires trusting the file on load (executes Python).
+Loading pickled `nn.Module` requires that you trust the source file.
 """
 
 from __future__ import annotations
@@ -45,30 +57,43 @@ from .validatorsforvoice import ConfigError
 # ---------------------------- small utils ----------------------------
 
 def _safe_filename(s: str) -> str:
-    """Keep alnum, dash, underscore; replace others with '_'."""
+    """Return a filesystem-friendly name: keep alnum/dash/underscore, replace the rest with '_'."""
     return "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(s))
 
 
 def _find_first_conv(module: nn.Module) -> Optional[Tuple[nn.Module, str, nn.Conv2d]]:
-    """Heuristically locate the first Conv2d in common torchvision classifiers."""
+    """
+    Try to locate the first Conv2d in common torchvision classifiers.
+
+    Returns:
+        (parent_module, attribute_name, conv_layer) or None if no Conv2d is found.
+    """
     if hasattr(module, "conv1") and isinstance(module.conv1, nn.Conv2d):
         return module, "conv1", module.conv1
     for name, child in module.named_children():
         if isinstance(child, nn.Conv2d):
             return module, name, child
         if name == "features" and isinstance(child, nn.Sequential):
-            for i, layer in enumerate(child):
+            for subname, layer in child.named_children():
                 if isinstance(layer, nn.Conv2d):
-                    return child, str(i), layer
+                    return child, subname, layer
+
     for _, child in module.named_children():
         res = _find_first_conv(child)
         if res is not None:
             return res
+
     return None
 
 
 def _adapt_first_conv_in_channels(model: nn.Module, target_in: int) -> None:
-    """Replace first Conv2d to match `target_in` channels. If shrinking 3->1, average RGB weights."""
+    """
+    Replace the first Conv2d to match `target_in` channels.
+
+    - If `target_in` is 1 and the original conv has 3 channels, we average RGB
+      weights to create the 1-channel kernel.
+    - Only 1 or 3 channels are supported.
+    """
     if target_in in (None, 0) or target_in == 3:
         return
     if target_in not in (1, 3):
@@ -104,7 +129,12 @@ def _adapt_first_conv_in_channels(model: nn.Module, target_in: int) -> None:
 
 
 def _find_last_linear(module: nn.Module):
-    """Locate the last nn.Linear leaf in a module tree; return (parent, attr_name, layer) or None."""
+    """
+    Walk the module tree and return the last encountered nn.Linear.
+
+    Returns:
+        (parent_module, attribute_name, linear_layer) or None.
+    """
     last = None
     for _, child in module.named_children():
         res = _find_last_linear(child)
@@ -118,8 +148,11 @@ def _find_last_linear(module: nn.Module):
 
 def _replace_final_layer_for_arch(model: nn.Module, arch: str, num_classes: int = 2) -> nn.Module:
     """
-    Replace the final classifier depending on torchvision architecture,
-    falling back to the last Linear if needed. No Softmax is added here.
+    Replace the classifier/head so the model outputs `num_classes`.
+
+    We branch on the known torchvision families first and fall back to
+    "last Linear in the tree" if no specific rule matches.
+    No Softmax is added here.
     """
     a = arch.lower()
 
@@ -168,7 +201,7 @@ def _replace_final_layer_for_arch(model: nn.Module, arch: str, num_classes: int 
     if "inception" in a:
         if hasattr(model, "fc") and isinstance(model.fc, nn.Linear):
             model.fc = nn.Linear(model.fc.in_features, num_classes, bias=True)
-        aux = getattr(model, "AuxLogLogits", None)
+        aux = getattr(model, "AuxLogits", None)
         if aux is not None and hasattr(aux, "fc") and isinstance(aux.fc, nn.Linear):
             aux.fc = nn.Linear(aux.fc.in_features, num_classes, bias=True)
         return model
@@ -183,7 +216,12 @@ def _replace_final_layer_for_arch(model: nn.Module, arch: str, num_classes: int 
 
 
 def _instantiate_torchvision(arch: str, pretrained: bool) -> nn.Module:
-    """Instantiate a torchvision model by name with/without weights."""
+    """
+    Build a torchvision model by name, with or without pretrained weights.
+
+    The name is normalized to match known torchvision entry points.
+    Some architectures (e.g. GoogLeNet, Inception) require extra kwargs.
+    """
     name = arch.strip().lower()
     name_map = {
         "alexnet": "alexnet",
@@ -199,7 +237,7 @@ def _instantiate_torchvision(arch: str, pretrained: bool) -> nn.Module:
         "vit_b_16": "vit_b_16",
         "googlenet": "googlenet",
         "inception_v3": "inception_v3",
-        # ---- NEW: ConvNeXt family ----
+        # ConvNeXt family
         "convnext_tiny": "convnext_tiny",
         "convnext_small": "convnext_small",
         "convnext_base": "convnext_base",
@@ -220,7 +258,7 @@ def _instantiate_torchvision(arch: str, pretrained: bool) -> nn.Module:
         else:
             return fn(weights=None, **extra_kwargs)
     except TypeError:
-        # Backward compatibility for older torchvision (< 0.13)
+        # Fallback for older torchvision versions
         return fn(pretrained=bool(pretrained), **extra_kwargs)
 
 
@@ -228,12 +266,11 @@ def _instantiate_torchvision(arch: str, pretrained: bool) -> nn.Module:
 
 class ModelLoader:
     """
-    Prepare models according to config and save them under models/loaded/.
+    Build and register models under `outputs/<EXP>/models/loaded/` for one experiment.
 
-    - Benchmarks (torchvision): 'scratch' / 'pretrain' — saved as **pickled nn.Module**
-      with `.pt` extension. Final head set to 2 outputs; **no Softmax added here**.
-    - User models (TorchScript ONLY): copied (re-saved) unchanged as
-      <basename>_usermodel_jit.pt.
+    - Torchvision benchmarks → pickled `nn.Module` with 2 outputs.
+    - User TorchScript models → re-saved, unchanged, with the `_usermodel_jit.pt`
+      suffix, and recorded in the manifest.
     """
 
     def __init__(self, exp: CreateExperiment) -> None:
@@ -247,14 +284,21 @@ class ModelLoader:
     def prepare_benchmarks(
         self,
         *,
-        add_softmax: bool = False,             # <-- now False by default; ignored (no softmax here)
+        add_softmax: bool = False,             # kept for backward signature; not used
         input_channels: Optional[int] = None,
     ) -> Dict[str, Dict[str, str]]:
         """
-        Prepare torchvision benchmark models based on cfg.type_train ('scratch'|'pretrain'|'both').
+        Create torchvision benchmark models according to `cfg.type_train`
+        ('scratch' | 'pretrain' | 'both') and store them in models/loaded/.
 
         Returns:
-            { model_name: { 'scratch'?: path, 'pretrain'?: path } }
+            {
+                "<model_name>": {
+                    "scratch": "<repo_rel_path>.pt",
+                    "pretrain": "<repo_rel_path>.pt",
+                },
+                ...
+            }
         """
         results: Dict[str, Dict[str, str]] = {}
         type_train = (self.cfg.type_train or "both").strip().lower()
@@ -265,25 +309,40 @@ class ModelLoader:
 
         for model_name in (self.cfg.models_list or []):
             saved: Dict[str, str] = {}
+            name_lower = str(model_name).lower()
 
             if want_scratch:
                 m = _instantiate_torchvision(model_name, pretrained=False)
                 _adapt_first_conv_in_channels(m, in_ch)
+                if in_ch == 1 and ("googlenet" in name_lower or "inception" in name_lower):
+                    if hasattr(m, "transform_input"):
+                        m.transform_input = False
+                    if "inception" in name_lower:
+                        if hasattr(m, "AuxLogits"):
+                            m.AuxLogits = None
+                        if hasattr(m, "aux_logits"):
+                            m.aux_logits = False
                 m = _replace_final_layer_for_arch(m, model_name, num_classes=2)
-                # No Softmax here
                 fname = f"{_safe_filename(model_name)}_scratch.pt"
                 fpath = self.exp.loaded_models / fname
-                torch.save(m, str(fpath))  # PICKLED MODULE, .pt extension
+                torch.save(m, str(fpath))  # pickled module
                 saved["scratch"] = self._repo_rel(fpath)
 
             if want_pretrain:
                 m = _instantiate_torchvision(model_name, pretrained=True)
                 _adapt_first_conv_in_channels(m, in_ch)
+                if in_ch == 1 and ("googlenet" in name_lower or "inception" in name_lower):
+                    if hasattr(m, "transform_input"):
+                        m.transform_input = False
+                    if "inception" in name_lower:
+                        if hasattr(m, "AuxLogits"):
+                            m.AuxLogits = None
+                        if hasattr(m, "aux_logits"):
+                            m.aux_logits = False
                 m = _replace_final_layer_for_arch(m, model_name, num_classes=2)
-                # No Softmax here
                 fname = f"{_safe_filename(model_name)}_pretrain.pt"
                 fpath = self.exp.loaded_models / fname
-                torch.save(m, str(fpath))  # PICKLED MODULE, .pt extension
+                torch.save(m, str(fpath))  # pickled module
                 saved["pretrain"] = self._repo_rel(fpath)
 
             results[str(model_name)] = saved
@@ -297,20 +356,17 @@ class ModelLoader:
     def prepare_user_models(
         self,
         *,
-        add_softmax: bool = False,             # ignored for JIT (kept for signature symmetry)
+        add_softmax: bool = False,             # ignored for JIT, kept for symmetry
         input_channels: Optional[int] = None,  # ignored for JIT
         weights_only: bool = True,             # ignored for JIT
     ) -> Dict[str, str]:
         """
-        Discover user TorchScript archives under cfg.models_path, load & re-save them
-        unchanged into outputs/<EXP>/models/loaded/ as <basename>_usermodel_jit.pt.
+        Find TorchScript archives in `cfg.models_path`, load them and re-save them
+        into the experiment's `models/loaded/` folder, adding the `_usermodel_jit.pt`
+        suffix. Manifest is updated so the trainer can discover these models.
 
         Returns:
-            { original_basename: saved_path_repo_relative }
-
-        Notes:
-            - Only .pt/.pth files that can be opened by `torch.jit.load` are accepted.
-            - Files that are NOT valid TorchScript archives are skipped.
+            { original_filename: repo_relative_saved_path }
         """
         models_dir = Path(self.cfg.models_path)
         if not models_dir.exists():
@@ -323,7 +379,7 @@ class ModelLoader:
             try:
                 jit_model = torch.jit.load(str(p), map_location="cpu")
             except Exception:
-                # Not a TorchScript archive -> skip silently
+                # Not a valid TorchScript archive → skip silently
                 continue
 
             dst = self.exp.loaded_models / f"{_safe_filename(p.stem)}_usermodel_jit.pt"
@@ -337,6 +393,9 @@ class ModelLoader:
     # ---------------- manifest updates ----------------
 
     def _update_manifest_for_benchmark(self, model_name: str, saved_variants: Dict[str, str]) -> None:
+        """
+        Insert/overwrite the model entry with its loaded benchmark variants.
+        """
         ex = self.exp.experiment_dict
         if ex is None:
             return
@@ -360,6 +419,10 @@ class ModelLoader:
         entry["loaded_variants"] = dict(saved_variants)
 
     def _update_manifest_for_user_model_jit(self, original_name: str, repo_rel_path: str) -> None:
+        """
+        Register a user TorchScript model under a synthetic key
+        'usermodel_<original_name>' with a single 'usermodel_jit' variant.
+        """
         ex = self.exp.experiment_dict
         if ex is None:
             return
@@ -391,6 +454,9 @@ class ModelLoader:
     # ---------------- misc ----------------
 
     def _repo_rel(self, p: Path) -> str:
-        """Return repo-relative POSIX path for consistency with experiment.json."""
+        """
+        Convert an absolute path inside the repo to a POSIX-style repo-relative path.
+        """
         rel = os.path.relpath(str(Path(p).resolve()), str(self.exp.repo_root.resolve()))
         return rel.replace(os.sep, "/")
+

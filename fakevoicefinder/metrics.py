@@ -1,27 +1,27 @@
 """
-metrics.py — Evaluation & plotting utilities for fakevoicefinder.
+metrics.py — Evaluation and plotting utilities for FakeVoiceFinder.
 
-This module loads the trained checkpoints registered in `experiment.json`,
+This module reads the trained checkpoints registered in `experiment.json`,
 evaluates them on the prepared **test** transforms, builds a metrics DataFrame,
-and provides three plotting helpers:
+and exposes three plotting helpers:
 
 1) plot_architectures_for_transform:
    Bar chart of (model + variant) performance for a single transform.
 
 2) plot_variants_for_model:
-   Bar chart of a single (model, variant) across all available transforms.
+   Bar chart of one (model, variant) across all available transforms.
 
 3) plot_heatmap_models_transforms:
-   Heatmap with rows = "model (variant)" and columns = transforms.
+   Heatmap where rows = "model (variant)" and columns = transforms.
 
 Key principles
 --------------
-- **Read-only**: This module does NOT modify experiment.json.
-- **Reports folder**: Figures/CSVs are saved under `outputs/<exp>/reports/`.
-- **Variants**: Supports 'scratch', 'pretrain' (pickled nn.Module) and
+- Read-only: this module does NOT write back to experiment.json.
+- Reports: figures/CSVs are written to `outputs/<exp>/reports/`.
+- Variants: supports 'scratch', 'pretrain' (pickled nn.Module) and
   'usermodel_jit' (TorchScript).
-- **torch.load**: We explicitly use `weights_only=False` for pickled modules
-  to avoid PyTorch 2.6's new default that can raise errors.
+- Loading: we call `torch.load(..., weights_only=False)` for pickled modules
+  to avoid PyTorch 2.6+ errors.
 
 Dependencies
 ------------
@@ -62,18 +62,22 @@ from .experiment import CreateExperiment
 # Dataset to read test .npy features saved by the data preparation step
 # ---------------------------------------------------------------------
 
+# Expected classes and numeric labels (duplicated to scan potential folders)
 _CLASS_DIRS = [("real", 0), ("real", 0), ("fake", 1), ("fake", 1)]
 
 
 class NpyFolderDataset(Dataset):
     """
-    Minimal dataset for .npy spectrogram tensors saved under class folders.
+    Minimal dataset for spectrogram-like `.npy` files saved per class.
 
-    Expected folder structure:
-        <root>/<class>/*.npy, where <class> in {'real','fake'} (or 'real','fake').
+    Expected directory layout:
+        <root>/<class>/*.npy, with <class> in {'real', 'fake'}.
 
-    Each .npy must be 2D ([H, W]) or 3D ([C, H, W]) with C in {1,3}.
+    Each .npy must be:
+        - 2D: [H, W] → converted to [1, H, W], or
+        - 3D: [C, H, W] with C in {1, 3}.
     """
+
     def __init__(self, root: Path):
         self.root = Path(root)
         if not self.root.exists():
@@ -112,31 +116,30 @@ class NpyFolderDataset(Dataset):
 
 class MetricsReporter:
     """
-    Load trained checkpoints and compute metrics on test transforms.
+    Evaluate trained checkpoints on test transforms and produce metrics/plots.
 
-    Usage (no retraining required):
-        cfg = ExperimentConfig()              # you can set minimal fields only
+    Typical flow:
+        cfg = ExperimentConfig()
         cfg.run_name = "exp_name"
         exp = CreateExperiment(cfg, experiment_name=cfg.run_name)
-        exp.build(make_dirs=False)           # does NOT touch disk if folders exist
+        exp.build(make_dirs=False)
 
-        rep = MetricsReporter(exp)           # reads experiment.json
-        df  = rep.evaluate_all("metrics.csv")# optional CSV to reports/
-        rep.plot_architectures_for_transform(df, transform="mel", metric="accuracy",
-                                             y_min=60, y_max=100, out_name="fig_arch_mel_acc.png")
-        rep.plot_variants_for_model(df, model="resnet18", variant="pretrain",
-                                    metric="f1", out_name="fig_resnet18_pretrain_f1.png")
-        rep.plot_heatmap_models_transforms(df, metric="accuracy",
-                                           out_name="fig_heatmap_acc.png")
+        rep = MetricsReporter(exp)
+        df  = rep.evaluate_all("metrics.csv")
+
+        rep.plot_architectures_for_transform(df, transform="mel", metric="accuracy")
+        rep.plot_variants_for_model(df, model="resnet18", variant="pretrain", metric="f1")
+        rep.plot_heatmap_models_transforms(df, metric="accuracy")
 
     Notes
     -----
-    - If `exp.experiment_dict` is None, this class automatically loads it from disk.
-    - Figures and CSVs are saved under `outputs/<exp>/reports/`.
+    - If the in-memory experiment dict is missing, it is loaded from
+      `outputs/<exp>/experiment.json`.
+    - Output artifacts (CSVs, figures) go to the experiment's `reports/` folder.
     """
 
     def __init__(self, exp: CreateExperiment, device: Optional[str] = None) -> None:
-        # If the CreateExperiment wasn't populated in memory, read experiment.json now
+        # Base experiment objects/paths
         self.exp = exp
         self.cfg = exp.cfg
         self.repo_root = exp.repo_root
@@ -151,11 +154,11 @@ class MetricsReporter:
             self.exp.experiment_dict = full.get("experiment", {})
         self.manifest: Dict = self.exp.experiment_dict
 
-        # Reports dir (create if missing) — does not write back to the manifest
+        # Reports dir (local-only, no manifest writeback)
         self.reports_dir = self.root / "reports"
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
-        # Device
+        # Device selection
         d = (self.cfg.device or "cpu").strip().lower()
         if device is not None:
             d = device
@@ -164,20 +167,21 @@ class MetricsReporter:
             d = "cpu"
         self.device = torch.device("cuda" if d in ("gpu", "cuda") else "cpu")
 
-        # Cache for test dataloaders per transform
+        # DataLoader cache per transform
         self._test_loader_cache: Dict[str, DataLoader] = {}
 
     # -------------------- public API --------------------
 
     def evaluate_all(self, save_csv_name: Optional[str] = None) -> pd.DataFrame:
         """
-        Convenience wrapper: run summarize() and (optionally) save a CSV in reports/.
+        Evaluate every trained variant found in the manifest and optionally
+        persist the result as CSV inside `reports/`.
 
         Args:
-            save_csv_name: If provided, CSV filename to store in reports/ (e.g., "metrics.csv")
+            save_csv_name: filename for the CSV (e.g. "metrics.csv").
 
         Returns:
-            The metrics DataFrame.
+            pd.DataFrame with one row per (model, variant, transform).
         """
         df = self.summarize()
         if save_csv_name:
@@ -188,12 +192,14 @@ class MetricsReporter:
 
     def summarize(self) -> pd.DataFrame:
         """
-        Build a DataFrame with one row per (model, variant, transform):
-            columns = ['model', 'variant', 'transform',
-                       'accuracy', 'f1', 'f1_macro', 'f1_micro', 'precision', 'recall',
-                       'checkpoint']
+        Build a DataFrame with one row per (model, variant, transform).
 
-        Uses ONLY the **test** dataset of each transform.
+        Columns:
+            ['model', 'variant', 'transform',
+             'accuracy', 'f1', 'f1_macro', 'f1_micro', 'precision', 'recall',
+             'checkpoint']
+
+        It uses only the **test** split for each transform.
         """
         rows: List[Dict] = []
 
@@ -204,17 +210,14 @@ class MetricsReporter:
         for model_name, meta in models.items():
             trained = meta.get("trained_variants", {})
             if not trained:
-                # Nothing trained for this model
                 continue
 
             for transform, var_map in trained.items():
-                # Build/load test loader once per transform
                 loader = self._get_test_loader(transform)
 
                 for variant, ckpt_rel in var_map.items():
                     ckpt_path = self.repo_root / ckpt_rel
 
-                    # Load model depending on variant
                     model = self._load_model_variant(ckpt_path, variant)
                     acc, f1_main, f1_macro, f1_micro, prec, rec = self._eval_metrics(model, loader)
 
@@ -223,12 +226,12 @@ class MetricsReporter:
                             "model": str(model_name),
                             "variant": str(variant),
                             "transform": str(transform),
-                            "accuracy": round(float(acc) * 100.0, 2),      # percentage
-                            "f1": round(float(f1_main) * 100.0, 2),        # percentage (binary w/ fallback)
-                            "f1_macro": round(float(f1_macro) * 100.0, 2), # percentage
-                            "f1_micro": round(float(f1_micro) * 100.0, 2), # percentage
-                            "precision": round(float(prec) * 100.0, 2),    # percentage (pos_label=1)
-                            "recall": round(float(rec) * 100.0, 2),        # percentage (pos_label=1)
+                            "accuracy": round(float(acc) * 100.0, 2),
+                            "f1": round(float(f1_main) * 100.0, 2),
+                            "f1_macro": round(float(f1_macro) * 100.0, 2),
+                            "f1_micro": round(float(f1_micro) * 100.0, 2),
+                            "precision": round(float(prec) * 100.0, 2),
+                            "recall": round(float(rec) * 100.0, 2),
                             "checkpoint": ckpt_rel,
                         }
                     )
@@ -237,7 +240,6 @@ class MetricsReporter:
             raise RuntimeError("No trained variants found to evaluate.")
 
         df = pd.DataFrame(rows)
-        # Deterministic order
         df = df.sort_values(by=["transform", "model", "variant"]).reset_index(drop=True)
         return df
 
@@ -251,17 +253,17 @@ class MetricsReporter:
         metric: str = "accuracy",
         y_min: Optional[float] = None,
         y_max: Optional[float] = None,
-        out_name: Optional[str] = None,   # saved under reports/
+        out_name: Optional[str] = None,
     ) -> None:
         """
-        Bar chart of (model + variant) performance for a single transform.
+        Plot all (model, variant) pairs for a given transform as a bar chart.
 
         Args:
-            df: DataFrame from summarize()/evaluate_all()
-            transform: Transform name (e.g. "mel", "log")
-            metric: one of {"accuracy","f1","f1_macro","f1_micro","precision","recall"}
-            y_min, y_max: Optional Y-axis limits (percentages)
-            out_name: Optional filename to save in reports/
+            df: DataFrame returned by summarize()/evaluate_all().
+            transform: target transform (e.g. "mel", "log").
+            metric: column to plot (e.g. "accuracy").
+            y_min, y_max: optional y-axis limits in percentage.
+            out_name: optional filename (saved to reports/).
         """
         mcol = metric.lower()
         allowed = {"accuracy", "f1", "f1_macro", "f1_micro", "precision", "recall"}
@@ -272,7 +274,6 @@ class MetricsReporter:
         if sub.empty:
             raise RuntimeError(f"No rows for transform='{transform}' in the DataFrame.")
 
-        # Label = "model (variant)" to show all variants side by side
         sub["label"] = sub["model"].astype(str) + " (" + sub["variant"].astype(str) + ")"
         sub = sub.sort_values(by=mcol, ascending=False)
 
@@ -305,18 +306,18 @@ class MetricsReporter:
         metric: str = "accuracy",
         y_min: Optional[float] = None,
         y_max: Optional[float] = None,
-        out_name: Optional[str] = None,   # saved under reports/
+        out_name: Optional[str] = None,
     ) -> None:
         """
-        Bar chart for a single (model, variant) across all transforms.
+        Plot all transforms for a single (model, variant) as a bar chart.
 
         Args:
-            df: DataFrame from summarize()/evaluate_all()
-            model: Model name as appears in experiment.json
-            variant: One of {"scratch","pretrain","usermodel_jit"}
-            metric: one of {"accuracy","f1","f1_macro","f1_micro","precision","recall"}
-            y_min, y_max: Optional Y-axis limits (percentages)
-            out_name: Optional filename to save in reports/
+            df: DataFrame from summarize()/evaluate_all().
+            model: model name exactly as in experiment.json.
+            variant: one of {"scratch", "pretrain", "usermodel_jit"}.
+            metric: metric column to use.
+            y_min, y_max: optional y-axis limits.
+            out_name: optional filename (saved to reports/).
         """
         mcol = metric.lower()
         allowed = {"accuracy", "f1", "f1_macro", "f1_micro", "precision", "recall"}
@@ -356,21 +357,15 @@ class MetricsReporter:
         metric: str = "accuracy",
         vmin: Optional[float] = None,
         vmax: Optional[float] = None,
-        out_name: Optional[str] = None,   # saved under reports/
+        out_name: Optional[str] = None,
     ) -> None:
         """
-        Heatmap with rows = "model (variant)" and columns = transforms.
+        Heatmap where rows are "model (variant)" and columns are transforms.
 
-        Defaults:
-          - Color scale: vmin = worst observed value, vmax = 100.
-          - Colormap: 'RdYlGn' (red = bad, green = good).
-          - Each cell shows its value as a percentage.
-
-        Args:
-            df: DataFrame from summarize()/evaluate_all()
-            metric: one of {"accuracy","f1","f1_macro","f1_micro","precision","recall"}
-            vmin, vmax: Optional explicit color range (percentages).
-            out_name: Optional filename to save in reports/
+        Default behavior:
+        - Color range: from the worst observed value up to 100%.
+        - Colormap: 'RdYlGn' (red = low score, green = high score).
+        - Each cell shows its value as a percentage.
         """
         mcol = metric.lower()
         allowed = {"accuracy", "f1", "f1_macro", "f1_micro", "precision", "recall"}
@@ -381,10 +376,8 @@ class MetricsReporter:
         tmp["row"] = tmp["model"].astype(str) + " (" + tmp["variant"].astype(str) + ")"
         pivot = tmp.pivot_table(index="row", columns="transform", values=mcol, aggfunc="max")
 
-        # Matrix of values (already in percentages from summarize())
         A = pivot.to_numpy(dtype=float)
 
-        # Default color scaling
         worst = float(np.nanmin(A)) if A.size else 0.0
         vmin_eff = float(vmin) if vmin is not None else worst
         vmax_eff = float(vmax) if vmax is not None else 100.0
@@ -394,18 +387,16 @@ class MetricsReporter:
             A,
             aspect="auto",
             interpolation="nearest",
-            cmap="RdYlGn",   # red -> bad, green -> good
+            cmap="RdYlGn",
             vmin=vmin_eff,
             vmax=vmax_eff,
         )
         plt.colorbar(im, label=f"{mcol.replace('_', ' ').title()} (%)")
 
-        # Axes / labels
         plt.yticks(range(len(pivot.index)), pivot.index)
         plt.xticks(range(len(pivot.columns)), pivot.columns, rotation=20, ha="right")
         plt.title(f"Models+variants × transforms — {mcol.replace('_', ' ').title()}")
 
-        # Annotate values inside cells, with auto-contrast text color
         def _text_color(value: float) -> str:
             r, g, b, _ = im.cmap(im.norm(value))
             luminance = 0.299 * r + 0.587 * g + 0.114 * b
@@ -418,8 +409,15 @@ class MetricsReporter:
                 if np.isnan(val):
                     plt.text(j, i, "—", ha="center", va="center", fontsize=10, color="gray")
                 else:
-                    plt.text(j, i, f"{val:.1f}%", ha="center", va="center",
-                             fontsize=10, color=_text_color(val))
+                    plt.text(
+                        j,
+                        i,
+                        f"{val:.1f}%",
+                        ha="center",
+                        va="center",
+                        fontsize=10,
+                        color=_text_color(val),
+                    )
 
         plt.tight_layout()
         out = self._resolve_savepath(out_name=out_name, default_name=f"fig_heatmap_{mcol}.png")
@@ -431,14 +429,13 @@ class MetricsReporter:
 
     def _resolve_savepath(self, *, out_name: Optional[str], default_name: str) -> Path:
         """
-        Build a path under 'reports/' using:
-            out_name (if provided) else default_name.
+        Build a path under `reports/` using the given name or the provided default.
         """
         name = out_name or default_name
         return self.reports_dir / name
 
     def _get_test_loader(self, transform: str) -> DataLoader:
-        """Return (and cache) a DataLoader for the given transform's **test** split."""
+        """Return and cache a DataLoader for the **test** split of the given transform."""
         key = transform.lower()
         if key in self._test_loader_cache:
             return self._test_loader_cache[key]
@@ -451,7 +448,6 @@ class MetricsReporter:
         test_root = self.repo_root / test_tf["path"]
         ds_test = NpyFolderDataset(test_root)
 
-        # Batch size: small-ish default or config batch size if available
         bs = int(getattr(self.cfg, "batch_size", 32))
         nw = int(getattr(self.cfg, "num_workers", 0))
         loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=nw, pin_memory=False)
@@ -460,28 +456,26 @@ class MetricsReporter:
 
     def _load_model_variant(self, path: Path, variant: str):
         """
-        Load a trained model checkpoint depending on its variant.
-
-        - 'usermodel_jit' -> torch.jit.load
-        - others (scratch/pretrain) -> torch.load(weights_only=False)  [pickled nn.Module]
+        Load a checkpoint depending on its variant:
+        - 'usermodel_jit' → torch.jit.load
+        - otherwise → torch.load(..., weights_only=False)
         """
         if variant.lower() == "usermodel_jit":
             return torch.jit.load(str(path), map_location=self.device)
-        # pickled nn.Module (benchmark)
         return torch.load(str(path), map_location=self.device, weights_only=False)
 
     @torch.no_grad()
     def _eval_metrics(self, model, loader: DataLoader) -> Tuple[float, float, float, float, float, float]:
         """
-        Compute accuracy and multiple F1 variants + precision/recall on the provided DataLoader.
+        Run the model on the given test loader and compute a set of classification metrics.
 
         Returns:
             (accuracy,
-             f1_main,   # binary F1 (pos_label=1) if viable; otherwise weighted F1 as fallback
+             f1_main,   # binary F1 (pos_label=1) if possible; otherwise weighted F1
              f1_macro,
              f1_micro,
-             precision, # binary precision for pos_label=1
-             recall)    # binary recall    for pos_label=1
+             precision, # binary precision for class 1
+             recall)    # binary recall for class 1
         """
         model.eval()
         all_preds: List[int] = []
@@ -502,17 +496,17 @@ class MetricsReporter:
         all_preds_arr = np.array(all_preds, dtype=np.int32)
         all_true_arr  = np.array(all_true,  dtype=np.int32)
 
-        # Accuracy estándar
+        # Basic accuracy
         total = max(len(all_true_arr), 1)
         acc = float((all_preds_arr == all_true_arr).sum()) / float(total)
 
-        # Presencia de clases en gt y pred
+        # Which classes appear in GT and prediction
         labels_true = set(np.unique(all_true_arr).tolist())
         labels_pred = set(np.unique(all_preds_arr).tolist())
         has_both_true = {0, 1}.issubset(labels_true)
         has_pos_pred  = 1 in labels_pred
 
-        # F1 por clase (para fallback ponderado)
+        # Per-class F1 and support (useful for weighted fallback)
         _, _, f1_per_class, support = precision_recall_fscore_support(
             all_true_arr, all_preds_arr, labels=[0, 1], zero_division=0
         )
@@ -522,21 +516,23 @@ class MetricsReporter:
         else:
             f1_weighted = 0.0
 
-        # F1 principal (binario si es viable; si no, ponderado)
+        # Main F1: use binary if both classes appear and positive is predicted;
+        # otherwise fall back to the weighted version.
         if has_both_true and has_pos_pred:
             f1_main = float(f1_score(all_true_arr, all_preds_arr, average="binary", pos_label=1, zero_division=0))
         else:
             f1_main = f1_weighted
 
-        # Macro & Micro F1
+        # Macro & micro F1
         f1_macro = float(f1_score(all_true_arr, all_preds_arr, average="macro", zero_division=0))
         f1_micro = float(f1_score(all_true_arr, all_preds_arr, average="micro", zero_division=0))
 
-        # Precision/Recall binarios para la clase positiva = 1
+        # Precision/recall for the positive class = 1
         precision = float(precision_score(all_true_arr, all_preds_arr, pos_label=1, zero_division=0))
         recall    = float(recall_score(all_true_arr, all_preds_arr,    pos_label=1, zero_division=0))
 
         return acc, f1_main, f1_macro, f1_micro, precision, recall
+
 
 
 

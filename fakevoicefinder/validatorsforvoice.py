@@ -1,31 +1,43 @@
-# validatorsforvoice.py
-"""Validation mixin for the forvoice project (Fake Or Real Voice).
+"""
+validatorsforvoice.py — Validation helpers for the FakeVoiceFinder stack.
 
-Simple design:
-- `ConfigError` for actionable validation failures.
-- `ValidationMixin.validate(...)` with boolean flags to toggle checks.
-- Internal `_check_*` helpers that assume the subclass exposes a few attributes.
+Purpose
+-------
+Provide a lightweight, opt-in validation layer for configuration objects
+(typically `ExperimentConfig`). The mixin exposes a single entrypoint
+`validate(...)` that runs several focused checks on paths, data files, lists,
+allowed values, numeric ranges, and cross-field semantics.
 
-Expected subclass attributes (ExperimentConfig provides these):
-    models_path: str
-    data_path: str
-    models_list: list[str]
-    flag_train: bool
-    type_train: str
-    transform_list: list[str]
+Inputs (expected config attributes)
+-----------------------------------
+A consumer (e.g. ExperimentConfig) is expected to expose at least:
+    models_path: str               # where user TorchScript models live
+    data_path: str                 # where real.zip and fake.zip live
+    models_list: list[str]         # benchmark model names to instantiate
+    flag_train: bool               # if False, we still need at least one model to evaluate
+    type_train: str                # 'scratch' | 'pretrain' | 'both'
+    transform_list: list[str]      # e.g. ['mel', 'log', 'dwt']
     epochs: int
     batch_size: int
     learning_rate: float
     patience: int
     num_workers: int
-    eval_metric: list[str]
-    device: str
-    real_zip: str
-    fake_zip: str
+    eval_metric: list[str]         # evaluation metrics names
+    device: str                    # 'cpu' | 'gpu'
+    real_zip: str                  # filename under data_path
+    fake_zip: str                  # filename under data_path
 
-Allowed sets can be overridden by the subclass as attributes:
-    ALLOWED_TYPE_TRAIN, ALLOWED_DEVICE, ALLOWED_OPTIM,
-    ALLOWED_TRANSFORMS, ALLOWED_METRICS
+Optionally, the config can also define:
+    outputs_path: str              # to override the default <repo_root>/outputs
+    ALLOWED_* sets                 # to override default domains
+
+Outputs / behavior
+------------------
+- On success: does nothing and returns None.
+- On failure: raises `ConfigError` with a concrete, actionable message.
+- If `create_dirs=True`, it will try to create missing outputs/models folders.
+- If `device='gpu'` but CUDA is not available, it will silently downgrade to
+  'cpu' (with a warning) when `check_cuda=True`.
 """
 from __future__ import annotations
 
@@ -34,10 +46,10 @@ import warnings
 
 
 class ConfigError(ValueError):
-    """Raised when the configuration is invalid with an actionable message."""
+    """Raised when configuration values are invalid or incomplete."""
 
 
-# Defaults (subclass may override)
+# Defaults (subclasses may override them)
 DEFAULT_ALLOWED_TYPE_TRAIN = {"scratch", "pretrain", "both"}
 DEFAULT_ALLOWED_DEVICE = {"cpu", "gpu"}
 DEFAULT_ALLOWED_OPTIM = {"adam", "sgd"}
@@ -46,10 +58,7 @@ DEFAULT_ALLOWED_METRICS = {"accuracy", "f1", "precision", "recall", "roc_auc"}
 
 
 class ValidationMixin:
-    """Tiny validation mixin. Call `validate()` only when you want.
-
-    Toggle checks via boolean parameters. If you never call validate(), nothing runs.
-    """
+    """Tiny, modular validator. Nothing runs until you call `validate()`."""
 
     # -------- Orchestrator --------
     def validate(
@@ -64,17 +73,28 @@ class ValidationMixin:
         create_dirs: bool = True,
         check_cuda: bool = True,
     ) -> None:
-        """Validate the configuration. Raises ConfigError on failure.
+        """Run all selected validations; raise ConfigError on the first failure.
 
-        Args:
-            check_paths: Verify path existence; optionally create outputs/models.
-            check_data: Verify required data files exist under data_path.
-            check_lists: Validate list fields (e.g., transform_list).
-            check_domains: Validate enumerated/domain fields.
-            check_numbers: Validate numeric ranges.
-            check_semantics: Cross-field logic (e.g., pretrain requires models).
-            create_dirs: If True and check_paths, create outputs/models when missing.
-            check_cuda: If True and device=='gpu', try to verify CUDA and fallback.
+        Parameters
+        ----------
+        check_paths:
+            Ensure `outputs/`, `models_path` and `data_path` exist. Can create
+            outputs/models if `create_dirs=True`.
+        check_data:
+            Ensure `real_zip` and `fake_zip` exist under `data_path`.
+        check_lists:
+            Ensure list-like fields (transforms/models) are not empty.
+        check_domains:
+            Validate that string-valued fields are within the allowed sets.
+        check_numbers:
+            Validate basic numeric ranges (epochs, batch_size, learning_rate...).
+        check_semantics:
+            Validate cross-field logic, such as "pretrain" needing actual models.
+        create_dirs:
+            If True and `check_paths` is on, create outputs/models when missing.
+        check_cuda:
+            If True and `device=='gpu'`, try to check CUDA and downgrade to CPU
+            with a warning when not available.
         """
         if check_domains:
             self._check_domains()
@@ -91,17 +111,16 @@ class ValidationMixin:
 
     # -------- Checks --------
     def _check_paths(self, *, create_dirs: bool) -> None:
-        # Always keep outputs under the repository root (unless cfg.outputs_path is provided)
-        repo_root = Path(__file__).resolve().parents[1]  # parent of 'forvoice'
+        # Keep outputs anchored to the repository root unless cfg.outputs_path says otherwise
+        repo_root = Path(__file__).resolve().parents[1]  # parent of the package root
 
-        # ---- MINIMAL CHANGE: honor cfg.outputs_path if present ----
+        # Honor user-provided outputs_path (relative to repo or absolute)
         outputs_cfg = getattr(self, "outputs_path", None)
         if outputs_cfg:
             out_path = Path(outputs_cfg)
             outputs = out_path if out_path.is_absolute() else (repo_root / out_path)
         else:
             outputs = repo_root / "outputs"
-        # -----------------------------------------------------------
 
         models = Path(self.models_path)
         data = Path(self.data_path)
@@ -143,7 +162,8 @@ class ValidationMixin:
         if not bool(getattr(self, "flag_train", True)):
             if not self._has_custom_models() and not getattr(self, "models_list", []):
                 raise ConfigError(
-                    "No models available to evaluate (models_list empty and no .pt/.pth in models_path) while flag_train=False."
+                    "No models available to evaluate: models_list is empty and models_path has no .pt/.pth, "
+                    "while flag_train=False."
                 )
 
     def _has_custom_models(self) -> bool:
@@ -193,10 +213,13 @@ class ValidationMixin:
     def _check_semantics(self, *, check_cuda: bool) -> None:
         if str(self.type_train).lower() == "pretrain":
             if not self.models_list and not self._has_custom_models():
-                raise ConfigError("type_train='pretrain' requires available models (.pt/.pth in models_path or benchmarks in models_list).")
+                raise ConfigError(
+                    "type_train='pretrain' requires at least one available model "
+                    "(a name in models_list or a .pt/.pth in models_path)."
+                )
 
         if str(self.device).lower() == "gpu" and check_cuda:
-            # Best-effort CUDA check: fallback to CPU with a warning if unavailable.
+            # Best-effort check: downgrade to CPU if we cannot confirm CUDA
             try:
                 import importlib
                 spec = importlib.util.find_spec("torch")

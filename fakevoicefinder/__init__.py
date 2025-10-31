@@ -1,4 +1,4 @@
-# existing exports...
+# Public exports for the FakeVoiceFinder package
 from .config import ExperimentConfig
 from .validatorsforvoice import ConfigError
 from .experiment import CreateExperiment
@@ -7,7 +7,7 @@ from .model_loader import ModelLoader
 from .trainer import Trainer
 from .duration_probe import shortest_audio_seconds
 
-# NEW: metrics reporter
+# Evaluation and inference utilities
 from .metrics import MetricsReporter
 from .inference import InferenceRunner, FakeProbabilityGauge  
 

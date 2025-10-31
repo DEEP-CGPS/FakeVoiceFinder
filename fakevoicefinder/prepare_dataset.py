@@ -1,18 +1,40 @@
 # prepare_dataset.py
 """
-PrepareDataset (zip-only, manifest-driven counters):
-- Read TWO zips from cfg.data_path (real.zip and fake.zip).
-- Stratified split (scikit-learn).
-- Extract selected originals into the experiment:
-    outputs/<EXP>/datasets/{train|test}/original/{real|fake}/<filename>.<ext>
-- Apply transforms ('mel', 'log', 'dwt') and save features as .npy under:
-    outputs/<EXP>/datasets/<split>/transforms/<transform>/{real|fake}/<basename>.npy
-  * DWT se reescala al tamaño deseado (image_size o 224) para compatibilidad con CNN/ViT.
-- Update experiment.json:
-    - Fill num_items for original_dataset (train/test).
-    - Store transform params (light metadata).
+PrepareDataset (zip-only, manifest-aware pipeline)
 
-Dependencies:
+Purpose
+-------
+This helper takes the two audio archives declared in the experiment config
+(`real.zip` and `fake.zip`), builds the train/test split, materializes the
+original audio files inside the current experiment, and generates the feature
+tensors (MEL, LOG, DWT) that the training code consumes.
+
+What it reads
+-------------
+- Two ZIP files located at:  <cfg.data_path>/<cfg.real_zip>  and
+                             <cfg.data_path>/<cfg.fake_zip>
+  These are expected to be audio-only ZIPs.
+
+What it writes
+--------------
+- Originals (preserving filenames) into:
+    outputs/<EXP>/datasets/{train|test}/original/{real|fake}/<filename>.<ext>
+- Transformed features (saved as .npy) into:
+    outputs/<EXP>/datasets/<split>/transforms/<transform>/{real|fake}/<basename>.npy
+  DWT outputs are always resized to a square image (cfg.image_size or 224) to
+  stay compatible with CNN / ViT style backbones.
+- The experiment manifest (experiment.json) is updated to:
+    - record the number of items in the train/test original datasets
+    - record the transform hyperparameters that were actually used
+
+Key traits
+----------
+- Works strictly from ZIPs (no loose folders).
+- Keeps the experiment layout created by CreateExperiment.
+- All paths stored in the manifest remain repo-relative.
+
+Dependencies
+------------
     pip install numpy librosa soundfile scikit-learn PyWavelets
 """
 from __future__ import annotations
@@ -49,7 +71,23 @@ LabeledMember = Tuple[ZipMember, int]   # ((zip_path, member), label_int) — 0=
 
 
 class PrepareDataset:
-    """ZIP-based preparer that writes into an existing experiment layout."""
+    """
+    ZIP-based dataset builder that fills an already-created experiment structure.
+
+    Inputs (from cfg):
+      - cfg.data_path : root folder where real/fake ZIPs live
+      - cfg.real_zip  : name of the ZIP that contains real audios
+      - cfg.fake_zip  : name of the ZIP that contains fake audios
+      - optional per-transform params: cfg.mel_params / cfg.log_params / cfg.dwt_params
+      - optional window/time control: cfg.clip_seconds
+      - optional spatial size for spectrogram-like features: cfg.image_size
+
+    Outputs (written under this experiment):
+      - /datasets/train/original/{real,fake}/...
+      - /datasets/test/original/{real,fake}/...
+      - /datasets/<split>/transforms/<mel|log|dwt>/{real,fake}/... .npy
+      - experiment.json is updated with counters and transform params
+    """
 
     def __init__(self, exp: CreateExperiment) -> None:
         if exp.experiment_dict is None:
@@ -74,9 +112,9 @@ class PrepareDataset:
         self.sample_rate = 16000
         self.mel_params = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
         self.log_params = dict(n_fft=1024, hop_length=256, win_length=None)
-        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # DWT → resize a image_size o 224
+        self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # DWT → resize to image_size or 224
 
-        # ---- Overrides opcionales desde cfg (cambio mínimo) ----
+        # ---- Optional overrides coming from cfg (minimal change) ----
         user_mel = getattr(self.cfg, "mel_params", None)
         if isinstance(user_mel, dict) and user_mel:
             self.mel_params.update(user_mel)
@@ -89,7 +127,7 @@ class PrepareDataset:
         if isinstance(user_dwt, dict) and user_dwt:
             self.dwt_params.update(user_dwt)
 
-        # Ventana de recorte/relleno (segundos). Default 3.0 si no se define.
+        # Clip/pad window in seconds. Default is 3.0 if not specified.
         clip_val = getattr(self.cfg, "clip_seconds", None)
         try:
             cs = float(clip_val) if clip_val is not None else 3.0
@@ -99,7 +137,7 @@ class PrepareDataset:
             cs = 3.0
         self.clip_seconds = cs
 
-        # Tamaño opcional de imagen para MEL/LOG/DWT (p. ej., 224 para ViT). None = usa 224 en DWT y no resize en MEL/LOG.
+        # Optional image side for MEL/LOG/DWT (e.g. 224 for ViT). None = DWT→224 and no resize for MEL/LOG.
         img_sz = getattr(self.cfg, "image_size", None)
         try:
             self.image_size = int(img_sz) if img_sz is not None else None
@@ -111,7 +149,7 @@ class PrepareDataset:
     # 1) LOAD ----------------------------------------------------------------
 
     def load_data(self) -> Dict[str, int]:
-        """Scan real.zip and fake.zip; build member lists."""
+        """Scan real.zip and fake.zip; collect their audio members into in-memory lists."""
         if not self.real_zip.is_file():
             raise ConfigError(f"Missing real zip: {self.real_zip}")
         if not self.fake_zip.is_file():
@@ -136,7 +174,7 @@ class PrepareDataset:
     # 2) SPLIT ---------------------------------------------------------------
 
     def split(self, train_ratio: float = 0.8, seed: int = 23) -> Dict[str, Dict[str, int]]:
-        """Stratified split with scikit-learn on zip members."""
+        """Stratified split (two classes) on top of the ZIP members using scikit-learn."""
         try:
             from sklearn.model_selection import train_test_split
         except Exception as e:
@@ -170,7 +208,7 @@ class PrepareDataset:
     # 3) SAVE ORIGINALS ------------------------------------------------------
 
     def save_original(self) -> Dict[str, int]:
-        """Extract selected members to experiment/original folders, preserving filenames."""
+        """Extract the selected ZIP members to the experiment/original folders, keeping their filenames."""
         out_train = self.exp.train_orig
         out_test  = self.exp.test_orig
         (out_train / "real").mkdir(parents=True, exist_ok=True)
@@ -181,7 +219,7 @@ class PrepareDataset:
         n_train = self._extract_members(self.train_items, out_train)
         n_test  = self._extract_members(self.test_items,  out_test)
 
-        # Update num_items in experiment.json (counts audios under originals)
+        # Update num_items in experiment.json (count audios under originals)
         ex = self.exp.experiment_dict
         if ex:
             ex["train_data"]["original_dataset"]["num_items"] = self._count_audio_files_in(out_train)
@@ -191,7 +229,7 @@ class PrepareDataset:
         return {"train": n_train, "test": n_test}
 
     def _extract_members(self, items: List[LabeledMember], dst_root: Path) -> int:
-        """Extract zip members into dst_root/{real|fake}/<filename> (preserve names)."""
+        """Extract ZIP members into dst_root/{real|fake}/<filename>, preserving the original ZIP name."""
         n = 0
         for (zip_path, member), label in items:
             cls = "real" if label == 0 else "fake"
@@ -209,7 +247,7 @@ class PrepareDataset:
         return n
 
     def _count_audio_files_in(self, root: Path) -> int:
-        """Count audio files under {real,fake} folders."""
+        """Count how many audio files exist below {real,fake} in the given root."""
         cnt = 0
         for sub in ("real", "fake"):
             d = root / sub
@@ -223,7 +261,10 @@ class PrepareDataset:
     # 4) TRANSFORM -----------------------------------------------------------
 
     def transform(self, transform_name: str) -> Dict[str, int]:
-        """Apply 'mel', 'log' o 'dwt' to originals (train/test) and save .npy under transforms/."""
+        """
+        Apply one transform ('mel', 'log', or 'dwt') to train/test originals and
+        save the result as .npy in the corresponding transforms folder.
+        """
         tkey = transform_name.lower()
         if tkey not in {"mel", "log", "dwt"}:
             raise ValueError("transform_name must be 'mel', 'log' o 'dwt'.")
@@ -237,13 +278,13 @@ class PrepareDataset:
         n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey)
         n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey)
 
-        # Guardar hiperparámetros de la transformación en experiment.json
+        # Persist transform hyperparameters to the manifest
         self.update_experiment_json(tkey)
 
         return {"train": n_train, "test": n_test}
 
     def _transform_split(self, orig_root: Path, out_root: Path, tkey: str) -> int:
-        """Read audios from orig_root/{real|fake} and write arrays to out_root/{real|fake}."""
+        """Read audios from orig_root/{real|fake} and write feature arrays to out_root/{real|fake}."""
         n = 0
         for src_cls, dst_cls in (("real", "real"), ("fake", "fake")):
             src_dir = orig_root / src_cls
@@ -254,7 +295,7 @@ class PrepareDataset:
                     continue
                 y, sr = librosa.load(str(wav), sr=self.sample_rate, mono=True)
 
-                # Ventana configurable (default 3.0 s)
+                # Configurable window (default 3.0 s)
                 y = librosa.util.fix_length(y, size=int(sr * self.clip_seconds))
 
                 arr = self._apply_transform(y, sr, tkey)
@@ -263,23 +304,23 @@ class PrepareDataset:
                 n += 1
         return n
 
-    # ---------- Helper: 2D resize (sin dependencias externas) ---------------
+    # ---------- Helper: 2D resize (no external deps) ------------------------
     def _resize_2d(self, img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
         """
-        Redimensiona img (H,W) a (target_h, target_w) mediante interpolación 1D
-        primero en ancho (por filas) y luego en alto (por columnas).
+        Resize a 2D array (H, W) → (target_h, target_w) by doing 1D interpolation
+        on rows first (width) and then on columns (height).
         """
         h, w = img.shape
-        # Redimensionar ancho (por filas)
+        # Resize width (row-wise)
         x_old = np.linspace(0.0, 1.0, num=w, dtype=np.float32)
         x_new = np.linspace(0.0, 1.0, num=target_w, dtype=np.float32)
         tmp = np.empty((h, target_w), dtype=np.float32)
         for i in range(h):
             tmp[i, :] = np.interp(x_new, x_old, img[i, :])
 
-        # Redimensionar alto (por columnas)
+        # Resize height (column-wise)
         if h == 1:
-            # Caso borde: si solo hay 1 fila, replicar
+            # Edge case: single-row input → replicate to target_h
             out = np.repeat(tmp, repeats=target_h, axis=0)
             return out.astype(np.float32)
 
@@ -303,7 +344,7 @@ class PrepareDataset:
                 power=2.0,
             )
             out = librosa.power_to_db(S, ref=np.max)
-            # Resize opcional para ViT (image_size×image_size)
+            # Optional square resize for ViT / image-like backbones
             if self.image_size:
                 out = self._resize_2d(out, self.image_size, self.image_size)
             return out
@@ -317,26 +358,26 @@ class PrepareDataset:
             )
             amp = np.abs(D)
             out = librosa.amplitude_to_db(amp, ref=np.max)
-            # Resize opcional para ViT (image_size×image_size)
+            # Optional square resize for ViT / image-like backbones
             if self.image_size:
                 out = self._resize_2d(out, self.image_size, self.image_size)
             return out
 
         elif tkey == "dwt":
-            # Escalograma DWT 2D (filas = [cA_L, cD_L, ..., cD_1]) + log-dB + resize a (image_size o 224)
+            # DWT scalogram 2D → rows = [cA_L, cD_L, ..., cD_1] → dB → resize to (image_size or 224)
             wavelet = self.dwt_params.get("wavelet", "db4")
             level   = int(self.dwt_params.get("level", 4))
             mode    = self.dwt_params.get("mode", "symmetric")
 
-            # Tamaño objetivo: usa image_size si está definido, si no 224.
+            # Final size: cfg.image_size if provided, otherwise 224
             target_size = int(self.image_size) if (self.image_size is not None) else 224
             TARGET_H, TARGET_W = target_size, target_size
 
-            # Coeficientes: [cA_L, cD_L, ..., cD_1]
+            # Wavelet coefficients: [cA_L, cD_L, ..., cD_1]
             coeffs = pywt.wavedec(y, wavelet=wavelet, level=level, mode=mode)
             coeffs_abs = [np.abs(c).astype(np.float32, copy=False) for c in coeffs]
 
-            # Re-muestrear cada banda directamente al ancho objetivo (evita bandas planas por padding)
+            # Resample each band to the target width (avoid flat bands due to padding)
             x_new = np.linspace(0.0, 1.0, num=TARGET_W, dtype=np.float32)
             rows: List[np.ndarray] = []
             for c in coeffs_abs:
@@ -345,12 +386,12 @@ class PrepareDataset:
                     continue
                 x_old = np.linspace(0.0, 1.0, num=c.shape[-1], dtype=np.float32)
                 rows.append(np.interp(x_new, x_old, c).astype(np.float32))
-            scalogram = np.stack(rows, axis=0)  # (niveles+1, TARGET_W)
+            scalogram = np.stack(rows, axis=0)  # (levels+1, TARGET_W)
 
-            # Compresión log en dB (alineado con MEL/LOG); clamp por estabilidad
+            # Log/dB compression for a scale similar to MEL/LOG
             scalogram_db = librosa.amplitude_to_db(scalogram, ref=np.max, top_db=80.0)
 
-            # Redimensionar altura al objetivo (ancho ya TARGET_W)
+            # Resize height to the target (width is already TARGET_W)
             scalogram_db = self._resize_2d(scalogram_db, TARGET_H, TARGET_W)
 
             return scalogram_db
@@ -361,7 +402,7 @@ class PrepareDataset:
     # 5) UPDATE MANIFEST -----------------------------------------------------
 
     def update_experiment_json(self, transform_name: str) -> None:
-        """Store transform params in experiment.json and persist it."""
+        """Write back the transform params that were actually used to experiment.json."""
         params = self._params_for_transform(transform_name.lower())
         ex = self.exp.experiment_dict
         if not ex:
@@ -374,7 +415,7 @@ class PrepareDataset:
         self.exp.update_manifest()
 
     def _params_for_transform(self, tkey: str) -> Dict[str, Any]:
-        # Registrar sample_rate, ventana y image_size (si aplica) junto con los hiperparámetros del transform
+        # Always store sample_rate, clip_seconds and image_size together with the transform params
         base = {"sample_rate": self.sample_rate, "clip_seconds": self.clip_seconds, "image_size": self.image_size}
         if tkey == "mel":
             return {**base, **self.mel_params}

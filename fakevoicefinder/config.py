@@ -1,12 +1,26 @@
-"""Simple experiment configuration for forvoice that inherits validations.
+"""Central experiment configuration for FakeVoiceFinder.
 
-- Single class `ExperimentConfig` inheriting from `ValidationMixin`.
-- Set attributes directly; call `validate()` only when you want.
-- Pure standard library (plus `runpy` for from_pyfile helper).
+This module defines a single configuration container, `ExperimentConfig`,
+responsible for describing *what* to train/infer and *where* to read/write
+artifacts.
 
-NOTE: The experiment artifacts are always stored under `<repo_root>/outputs`.
-`outputs_path` is kept only for backward compatibility and is **not used**
-by `CreateExperiment` nor by path validation (which fix outputs to repo root).
+Inputs (how you fill it):
+- You can create it empty and assign attributes in Python code.
+- You can load it from a plain dict (`ExperimentConfig.from_dict(...)`).
+- You can load it from a Python file with variables
+  (`ExperimentConfig.from_pyfile("my_config.py")`).
+
+Outputs (what you can get from it):
+- A plain dictionary ready to be stored or inspected (`to_dict()`).
+- A JSON file on disk for reproducible runs (`to_json(path)`).
+- A human-readable multi-line summary for debugging (`summary()`).
+
+Notes:
+- Validation is *opt-in*: the class inherits from `ValidationMixin`, but you
+  call `validate()` explicitly when you want to enforce constraints.
+- All experiment artifacts are placed under `<repo_root>/outputs`. The field
+  `outputs_path` is kept only for backward compatibility with older scripts and
+  is not used by `CreateExperiment` nor by the current path validation logic.
 """
 from __future__ import annotations
 
@@ -19,9 +33,25 @@ from .validatorsforvoice import ValidationMixin, ConfigError
 
 
 class ExperimentConfig(ValidationMixin):
-    """Very small configuration object with opt-in validation."""
+    """Configuration object describing data, models, transforms and runtime.
 
-    # Allowed sets can be overridden here if you need to customize domains.
+    This class acts as a single source of truth for a FakeVoiceFinder experiment.
+    It stores:
+    - Input locations (dataset, models directory, zip names).
+    - What to run (which models, which transforms, which training mode).
+    - How to run it (device, batch size, workers, optimizer).
+    - How to persist results (run name, saving policy).
+
+    Typical flow:
+    1. Build or load an instance (`__init__`, `from_dict`, or `from_pyfile`).
+    2. Optionally normalize/validate using the mixin.
+    3. Pass the resulting object to the components that prepare data, train,
+       evaluate and run inference.
+
+    The goal is to keep this object simple, explicit and serializable.
+    """
+
+    # Accepted values for several config fields; can be overridden if needed.
     ALLOWED_TYPE_TRAIN = {"scratch", "pretrain", "both"}
     ALLOWED_DEVICE = {"cpu", "gpu"}
     ALLOWED_OPTIM = {"adam", "sgd"}
@@ -29,27 +59,27 @@ class ExperimentConfig(ValidationMixin):
     ALLOWED_METRICS = {"accuracy", "f1", "precision", "recall", "roc_auc"}
 
     def __init__(self) -> None:
-        # --- Paths (user-controlled)
+        # User-provided repository-relative paths.
         self.models_path: str = "../models"
         self.data_path: str = "../dataset"
 
-        # (kept for backward-compat only; ignored by CreateExperiment/validation)
+        # Backward-compat field; actual outputs are fixed to the repo root.
         self.outputs_path: str = "outputs"
 
-        # --- Models
+        # Model selection and training control.
         self.models_list: List[str] = []
         self.flag_train: bool = True
         self.type_train: str = "both"  # 'scratch' | 'pretrain' | 'both'
 
-        # --- Transforms
+        # List of audio-to-image transforms to be created and consumed.
         self.transform_list: List[str] = ["mel", "log"]
 
-        # --- (NEW) Optional overrides for transform hyperparameters
+        # Optional per-transform configuration.
         self.mel_params: Optional[Dict[str, Any]] = None
         self.log_params: Optional[Dict[str, Any]] = None
         self.dwt_params: Optional[Dict[str, Any]] = None
 
-        # --- Training / Eval
+        # Training/evaluation hyperparameters.
         self.epochs: int = 20
         self.batch_size: int = 32
         self.optimizer: str = "Adam"  # 'Adam' | 'SGD'
@@ -57,41 +87,49 @@ class ExperimentConfig(ValidationMixin):
         self.patience: int = 10
         self.eval_metric: List[str] = ["accuracy", "F1"]
 
-        # --- Runtime
+        # Runtime setup.
         self.device: str = "gpu"  # 'gpu' | 'cpu'
         self.seed: int = 23
         self.num_workers: int = 4
 
-        # --- Persistence / cache
+        # Persistence and caching behavior.
         self.save_models: bool = True
         self.save_best_only: bool = True
         self.cache_features: bool = True
         self.run_name: Optional[str] = None
 
-        # --- Data files (inside data_path)
+        # Dataset file names expected under `data_path`.
         self.real_zip: str = "real.zip"
         self.fake_zip: str = "fake.zip"
 
-        # --- (NEW) Optional clip window (seconds). If None, defaults to 3.0s in PrepareDataset
+        # Optional clip duration in seconds. If None, dataset code supplies the default.
         self.clip_seconds: Optional[float] = None
 
-        # --- (NEW) Optional image size for transforms (e.g., 224 for ViT). If None, no resize in mel/log.
+        # Optional target image size for spectrogram-like transforms.
         self.image_size: Optional[int] = None
 
     # ---------- Convenience constructors ----------
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ExperimentConfig":
-        """Create a config from a plain dict. Unknown keys are ignored."""
+        """Create a configuration from a dictionary of parameters.
+
+        Input:
+            d: mapping of attribute names to values. Extra keys are ignored.
+               Key 'epoch' is accepted as an alias for 'epochs'.
+
+        Output:
+            An `ExperimentConfig` instance with the passed values applied and
+            basic normalization (lowercasing, lists normalized).
+        """
         cfg = cls()
-        d = dict(d)  # shallow copy
-        # Accept 'epoch' alias
+        d = dict(d)
         if "epoch" in d and "epochs" not in d:
             d["epochs"] = d.pop("epoch")
         for key, val in d.items():
             if hasattr(cfg, key):
                 setattr(cfg, key, val)
 
-        # Light normalization
+        # Basic normalization to keep consumers predictable.
         cfg.type_train = str(cfg.type_train).lower()
         cfg.device = str(cfg.device).lower()
         if str(cfg.optimizer).lower() in {"adam", "sgd"}:
@@ -102,7 +140,16 @@ class ExperimentConfig(ValidationMixin):
 
     @classmethod
     def from_pyfile(cls, path: str | Path) -> "ExperimentConfig":
-        """Create a config by executing a Python file (e.g., 'config.py')."""
+        """Create a configuration by executing a Python file with variables.
+
+        Input:
+            path: path to a .py file that defines config variables (e.g. models_list,
+                  data_path, transform_list, etc.).
+
+        Output:
+            An `ExperimentConfig` instance populated with the variables found
+            in the file. Variables with names starting with '__' are ignored.
+        """
         path = Path(path)
         if not path.exists():
             raise ConfigError(f"Config file not found: {path}")
@@ -112,18 +159,33 @@ class ExperimentConfig(ValidationMixin):
 
     # ---------- Small utilities ----------
     def to_dict(self) -> Dict[str, Any]:
-        """Return a plain dictionary form of the config."""
+        """Return the current configuration as a plain serializable dictionary.
+
+        Output:
+            dict with all configuration fields, suitable for JSON dumping or
+            logging.
+        """
         return dict(self.__dict__)
 
     def to_json(self, path: str | Path) -> None:
-        """Serialize the configuration to JSON."""
+        """Write the current configuration to a JSON file.
+
+        Input:
+            path: target path where the JSON will be stored. Parent directories
+                  are created if missing.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
 
     def summary(self) -> str:
-        """Human-readable multi-line summary of all fields."""
+        """Build a human-readable report of all configuration fields.
+
+        Output:
+            Multiline string listing every field and its current value, sorted
+            by field name. Useful for CLI tools and debug logs.
+        """
         items = sorted(self.to_dict().items(), key=lambda kv: kv[0])
         key_w = max(len(k) for k, _ in items)
         lines = ["ExperimentConfig:"]

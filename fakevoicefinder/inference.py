@@ -2,12 +2,29 @@
 """
 Inference utilities for FakeVoiceFinder.
 
-Minimal, self-contained runner that:
-- Loads a trained checkpoint (TorchScript or pickled nn.Module).
-- Loads an audio file, applies the requested transform ('mel'|'log'|'dwt')
-  using given parameters (with sensible defaults aligned to prepare_dataset.py).
-- Runs the model to obtain logits, applies softmax (if needed), and returns
-  percentages (0–100) for {'real', 'fake'}.
+This module provides a minimal, self-contained runner that:
+
+- Loads a trained checkpoint (either TorchScript or a pickled `nn.Module`).
+- Loads a single audio file from disk.
+- Applies one of the supported transforms (`"mel"`, `"log"`, or `"dwt"`) using
+  parameters that mirror the ones used in `prepare_dataset.py`.
+- Runs the model to obtain logits, converts them to probabilities if needed,
+  and returns class percentages for `{'real', 'fake'}`.
+
+Inputs:
+- A model file path (TorchScript or pickled module).
+- An audio file path to classify.
+- A transform name and, optionally, transform-specific parameters.
+- An optional device override.
+
+Outputs:
+- A dictionary with:
+    {
+        "real": <percent 0–100>,
+        "fake": <percent 0–100>,
+        "pred_label": "real" | "fake",
+        "confidence": <percent 0–100 of predicted class>
+    }
 
 Usage:
     from fakevoicefinder.inference import InferenceRunner
@@ -38,7 +55,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Any
 from pathlib import Path
-from typing import Iterable, Tuple  # nuevos tipos
+from typing import Iterable, Tuple  # new types for visualization helper
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.transforms as mtransforms
@@ -57,7 +74,7 @@ except Exception as e:
 
 
 class InferenceRunner:
-    """Single-audio inference with a trained model and a specified transform."""
+    """Single-audio inference runner that applies a selected audio-to-image transform."""
 
     # ------ defaults aligned with prepare_dataset.py ------
     _DEFAULT_SR = 16000
@@ -83,18 +100,18 @@ class InferenceRunner:
 
         self.params = dict(transform_params or {})
 
-        # Global controls
+        # Global audio controls
         self.sample_rate = int(self.params.pop("sample_rate", self._DEFAULT_SR))
         self.clip_seconds = float(self.params.pop("clip_seconds", self._DEFAULT_CLIP_S))
         img_sz = self.params.pop("image_size", self._DEFAULT_IMG)
         self.image_size = (int(img_sz) if img_sz is not None else None)
 
-        # Per-transform params (take from dict; fall back to defaults)
+        # Per-transform params (merge user overrides only for the selected transform)
         self.mel_params = {**self._DEFAULT_MEL, **({} if self.transform != "mel" else self.params)}
         self.log_params = {**self._DEFAULT_LOG, **({} if self.transform != "log" else self.params)}
         self.dwt_params = {**self._DEFAULT_DWT, **({} if self.transform != "dwt" else self.params)}
 
-        # Device
+        # Device selection (explicit > auto)
         d = (device or ("cuda" if torch.cuda.is_available() else "cpu")).lower()
         self.device = torch.device("cuda" if d in ("cuda", "gpu") and torch.cuda.is_available() else "cpu")
 
@@ -106,11 +123,14 @@ class InferenceRunner:
     @torch.no_grad()
     def predict(self, audio_path: str | Path) -> Dict[str, float]:
         """
-        Run inference on a single audio file.
+        Run inference on a single audio file and return class percentages.
 
         Returns:
-            {'real': pct, 'fake': pct, 'pred_label': 'real'|'fake', 'confidence': pct}
-            where percentages are in [0, 100] with two decimals.
+            dict with keys:
+                - 'real': float, percent in [0, 100]
+                - 'fake': float, percent in [0, 100]
+                - 'pred_label': str, 'real' or 'fake'
+                - 'confidence': float, percent in [0, 100] for the predicted class
         """
         audio_path = Path(audio_path)
         if not audio_path.exists():
@@ -157,8 +177,9 @@ class InferenceRunner:
 
     def _load_model(self, path: Path) -> nn.Module:
         """
-        Try TorchScript first; if it fails, fall back to pickled nn.Module.
-        This mirrors metrics.py behavior (torch.load(weights_only=False)).
+        Try to load the model as TorchScript first; if that fails, fall back to
+        a pickled PyTorch module. This mirrors `metrics.py` behavior
+        (`torch.load(..., weights_only=False)`).
         """
         try:
             return torch.jit.load(str(path), map_location=self.device)
@@ -168,11 +189,13 @@ class InferenceRunner:
 
     def _ensure_probabilities(self, logits: torch.Tensor) -> torch.Tensor:
         """
-        If logits look like probabilities already (values in [0,1] and rows sum≈1),
-        return them as-is. Otherwise apply softmax along dim=1.
+        Normalize model outputs to probabilities.
+
+        If the given tensor already looks like probabilities (all non-negative
+        and rows sum approximately to 1), it is returned as-is. Otherwise
+        a softmax is applied along dim=1.
         """
         with torch.no_grad():
-            # Basic heuristic: non-negative and sums close to 1
             sums = logits.float().sum(dim=1, keepdim=True)
             nonneg = (logits >= 0).all().item()
             approx_one = torch.allclose(sums, torch.ones_like(sums), atol=1e-3, rtol=1e-3)
@@ -183,7 +206,7 @@ class InferenceRunner:
     # ----- small helpers copied/adapted from prepare_dataset.py -----
 
     def _resize_2d(self, img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-        """Resize (H,W) → (target_h, target_w) using 1D interpolation rows then cols (no external deps)."""
+        """Resize a 2D array (H, W) to (target_h, target_w) using 1D interpolation on rows and columns."""
         h, w = img.shape
         x_old = np.linspace(0.0, 1.0, num=w, dtype=np.float32)
         x_new = np.linspace(0.0, 1.0, num=target_w, dtype=np.float32)
@@ -272,22 +295,19 @@ class InferenceRunner:
             raise ValueError(f"Unsupported transform '{tkey}'.")
 
 
-# ======================== ADDED: Visualization helper ========================
+# ======================== Visualization helper ========================
 
 
 class FakeProbabilityGauge:
     """
-    Compact gauge for visualizing the predicted probability of the 'fake' class.
+    Lightweight Matplotlib-based gauge to visualize the predicted probability
+    of the 'fake' class, using the dict returned by `InferenceRunner.predict(...)`.
 
-    - Matplotlib only (no seaborn).
-    - Smooth green→yellow→red gradient.
-    - Band labels (low/medium/high) drawn on a fixed row, separate from the title.
-    - Designed to work directly with the dict returned by `InferenceRunner.predict(...)`.
-
-    Usage:
-        gauge = FakeProbabilityGauge()
-        scores = runner.predict(audio_path)
-        gauge.plot_from_scores(scores, save_path="fake_probability_gauge.png")
+    Features:
+    - Color gradient green → yellow → red.
+    - Optional 3-band annotations (low/medium/high).
+    - Can take a raw percentage or a model scores dict.
+    - Saves to file or returns (fig, ax).
     """
 
     def __init__(
@@ -318,12 +338,12 @@ class FakeProbabilityGauge:
     # ----- public API -----
 
     def plot_from_scores(self, scores: Dict, *, prefer_key: str = "fake", save_path: Optional[str] = None):
-        """Build the gauge from a model `scores` dict."""
+        """Create the gauge using the score dictionary returned by the inference runner."""
         p = self._get_fake_percent_from_scores(scores, prefer=prefer_key)
         return self.plot(p, save_path=save_path)
 
     def plot(self, p: float, *, save_path: Optional[str] = None):
-        """Draw the gauge for a given percentage (0..100). Returns (fig, ax)."""
+        """Draw the gauge for a percentage in [0, 100]."""
         p = float(np.clip(p, 0, 100))
 
         fig, ax = plt.subplots(figsize=self.figsize, dpi=self.dpi)
@@ -348,12 +368,12 @@ class FakeProbabilityGauge:
         ax.set_xticks(np.arange(0, 101, 20))
         ax.set_xlabel(self.xlabel, labelpad=10)
 
-        # Optional threshold marker (no label, clean UI)
+        # Optional threshold marker
         if self.show_threshold:
             t = float(np.clip(self.threshold_value, 0, 100))
             ax.axvline(t, 0, 1, linewidth=2, color="black", alpha=0.8)
 
-        # Current value marker + label (kept inside right margin)
+        # Current value marker + label
         ax.axvline(p, 0, 1, linewidth=2.5, color="black")
         ax.plot(p, 0.5, marker="s", markersize=8, color="white",
                 markeredgecolor="black", zorder=5)
@@ -376,12 +396,12 @@ class FakeProbabilityGauge:
 
     @staticmethod
     def _to_percent(x: float) -> float:
-        """Map to [0,100]; if input in [0,1], scale to percent."""
+        """Normalize a value to the percentage range [0, 100]."""
         x = float(x)
         return float(np.clip(x * 100, 0, 100)) if 0.0 <= x <= 1.0 else float(np.clip(x, 0, 100))
 
     def _get_fake_percent_from_scores(self, scores: Dict, prefer: str = "fake") -> float:
-        """Extract fake probability from a scores dict."""
+        """Extract the 'fake' probability from a scores dict, or fall back to the most confident number."""
         if not isinstance(scores, dict):
             raise TypeError("scores must be a dict like {'real':..., 'fake':..., 'confidence':...}")
         if prefer in scores:
@@ -390,3 +410,5 @@ class FakeProbabilityGauge:
             return self._to_percent(scores["confidence"])
         numeric = [v for v in scores.values() if isinstance(v, (int, float))]
         return self._to_percent(max(numeric)) if numeric else 0.0
+
+
