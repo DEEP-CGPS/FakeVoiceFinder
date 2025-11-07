@@ -55,7 +55,7 @@ class ExperimentConfig(ValidationMixin):
     ALLOWED_TYPE_TRAIN = {"scratch", "pretrain", "both"}
     ALLOWED_DEVICE = {"cpu", "gpu"}
     ALLOWED_OPTIM = {"adam", "sgd"}
-    ALLOWED_TRANSFORMS = {"mel", "log", "dwt"}
+    ALLOWED_TRANSFORMS = {"mel", "log", "dwt", "cqt"}
     ALLOWED_METRICS = {"accuracy", "f1", "precision", "recall", "roc_auc"}
 
     def __init__(self) -> None:
@@ -78,6 +78,7 @@ class ExperimentConfig(ValidationMixin):
         self.mel_params: Optional[Dict[str, Any]] = None
         self.log_params: Optional[Dict[str, Any]] = None
         self.dwt_params: Optional[Dict[str, Any]] = None
+        self.cqt_params: Optional[Dict[str, Any]] = None
 
         # Training/evaluation hyperparameters.
         self.epochs: int = 20

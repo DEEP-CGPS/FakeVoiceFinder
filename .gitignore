@@ -7,10 +7,16 @@ dataset/**
 # models
 models/**
 !models/__init__.py
+!SimpleCNN_scripted.pt
 
 # outputs
 outputs/**
 !outputs/__init__.py
+
+# outputs
+testoutput/**
+
+
 
 __pycache__/
 *.py[cod]

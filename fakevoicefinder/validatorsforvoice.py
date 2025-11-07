@@ -16,7 +16,7 @@ A consumer (e.g. ExperimentConfig) is expected to expose at least:
     models_list: list[str]         # benchmark model names to instantiate
     flag_train: bool               # if False, we still need at least one model to evaluate
     type_train: str                # 'scratch' | 'pretrain' | 'both'
-    transform_list: list[str]      # e.g. ['mel', 'log', 'dwt']
+    transform_list: list[str]      # e.g. ['mel', 'log', 'dwt', 'cqt']
     epochs: int
     batch_size: int
     learning_rate: float
@@ -53,7 +53,7 @@ class ConfigError(ValueError):
 DEFAULT_ALLOWED_TYPE_TRAIN = {"scratch", "pretrain", "both"}
 DEFAULT_ALLOWED_DEVICE = {"cpu", "gpu"}
 DEFAULT_ALLOWED_OPTIM = {"adam", "sgd"}
-DEFAULT_ALLOWED_TRANSFORMS = {"mel", "log", "dwt"}
+DEFAULT_ALLOWED_TRANSFORMS = {"mel", "log", "dwt", "cqt"}
 DEFAULT_ALLOWED_METRICS = {"accuracy", "f1", "precision", "recall", "roc_auc"}
 
 
@@ -157,7 +157,7 @@ class ValidationMixin:
 
     def _check_lists(self) -> None:
         if not getattr(self, "transform_list", None):
-            raise ConfigError("transform_list cannot be empty (e.g., ['mel','log','dwt']).")
+            raise ConfigError("transform_list cannot be empty (e.g., ['mel','log','dwt','cqt']).")
 
         if not bool(getattr(self, "flag_train", True)):
             if not self._has_custom_models() and not getattr(self, "models_list", []):

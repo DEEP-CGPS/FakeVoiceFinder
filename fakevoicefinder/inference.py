@@ -6,7 +6,7 @@ This module provides a minimal, self-contained runner that:
 
 - Loads a trained checkpoint (either TorchScript or a pickled `nn.Module`).
 - Loads a single audio file from disk.
-- Applies one of the supported transforms (`"mel"`, `"log"`, or `"dwt"`) using
+- Applies one of the supported transforms (`"mel"`, `"log"`, `"dwt"` or `"cqt"`) using
   parameters that mirror the ones used in `prepare_dataset.py`.
 - Runs the model to obtain logits, converts them to probabilities if needed,
   and returns class percentages for `{'real', 'fake'}`.
@@ -36,7 +36,7 @@ Usage:
             # optional overrides; defaults shown below
             "sample_rate": 16000,
             "clip_seconds": 3.0,
-            "image_size": 224,         # only used for resizing MEL/LOG/DWT
+            "image_size": 224,         # only used for resizing MEL/LOG/DWT/CQT
             # MEL specific (used if transform == "mel"):
             "n_mels": 128, "n_fft": 1024, "hop_length": 256,
             "win_length": None, "fmin": 0, "fmax": None,
@@ -44,6 +44,9 @@ Usage:
             # "n_fft": 1024, "hop_length": 256, "win_length": None,
             # DWT specific (used if transform == "dwt"):
             # "wavelet": "db4", "level": 4, "mode": "symmetric"
+            # CQT specific (used if transform == "cqt"):
+            # "hop_length": 256, "fmin": librosa.note_to_hz("C1"),
+            # "bins_per_octave": 24, "n_bins": 96, "scale": True,
         },
         device=None  # 'cuda'|'cpu'|None (auto). Default: None
     )
@@ -64,7 +67,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# librosa is required for I/O and MEL/LOG transforms
+# librosa is required for I/O and MEL/LOG/CQT transforms
 try:
     import librosa
 except Exception as e:
@@ -79,11 +82,18 @@ class InferenceRunner:
     # ------ defaults aligned with prepare_dataset.py ------
     _DEFAULT_SR = 16000
     _DEFAULT_CLIP_S = 3.0
-    _DEFAULT_IMG = None  # For MEL/LOG/DWT; if None, MEL/LOG keep native size; DWT falls back to 224
+    _DEFAULT_IMG = None  # For MEL/LOG/DWT/CQT; if None, MEL/LOG/CQT keep native size; DWT falls back to 224
 
     _DEFAULT_MEL = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
     _DEFAULT_LOG = dict(n_fft=1024, hop_length=256, win_length=None)
     _DEFAULT_DWT = dict(wavelet="db4", level=4, mode="symmetric")
+    _DEFAULT_CQT = dict(
+        hop_length=256,
+        fmin=float(librosa.note_to_hz("C1")),
+        bins_per_octave=24,
+        n_bins=96,
+        scale=True,
+    )
 
     def __init__(
         self,
@@ -95,8 +105,8 @@ class InferenceRunner:
     ) -> None:
         self.model_path = Path(model_path)
         self.transform = str(transform).lower().strip()
-        if self.transform not in {"mel", "log", "dwt"}:
-            raise ValueError("transform must be one of {'mel','log','dwt'}.")
+        if self.transform not in {"mel", "log", "dwt", "cqt"}:
+            raise ValueError("transform must be one of {'mel','log','dwt','cqt'}.")
 
         self.params = dict(transform_params or {})
 
@@ -110,6 +120,7 @@ class InferenceRunner:
         self.mel_params = {**self._DEFAULT_MEL, **({} if self.transform != "mel" else self.params)}
         self.log_params = {**self._DEFAULT_LOG, **({} if self.transform != "log" else self.params)}
         self.dwt_params = {**self._DEFAULT_DWT, **({} if self.transform != "dwt" else self.params)}
+        self.cqt_params = {**self._DEFAULT_CQT, **({} if self.transform != "cqt" else self.params)}
 
         # Device selection (explicit > auto)
         d = (device or ("cuda" if torch.cuda.is_available() else "cpu")).lower()
@@ -143,7 +154,7 @@ class InferenceRunner:
         target_len = int(self.sample_rate * self.clip_seconds)
         y = librosa.util.fix_length(y, size=target_len)
 
-        # 3) Transform into 2D feature (H, W) in dB (for MEL/LOG) or DWT dB
+        # 3) Transform into 2D feature (H, W)
         feat_2d = self._apply_transform(y, sr=self.sample_rate, tkey=self.transform)  # (H, W)
 
         # 4) To tensor [1, C=1, H, W]
@@ -227,7 +238,8 @@ class InferenceRunner:
     def _apply_transform(self, y: np.ndarray, sr: int, tkey: str) -> np.ndarray:
         if tkey == "mel":
             S = librosa.feature.melspectrogram(
-                y=y, sr=sr,
+                y=y,
+                sr=sr,
                 n_mels=self.mel_params["n_mels"],
                 n_fft=self.mel_params["n_fft"],
                 hop_length=self.mel_params["hop_length"],
@@ -254,6 +266,31 @@ class InferenceRunner:
                 out = self._resize_2d(out, self.image_size, self.image_size)
             return out
 
+        elif tkey == "cqt":
+            # Constant-Q transform → magnitude in dB
+            fmin = self.cqt_params.get("fmin")
+            if fmin is None:
+                fmin = float(librosa.note_to_hz("C1"))
+            else:
+                fmin = float(fmin)
+
+            scale = bool(self.cqt_params.get("scale", True))
+
+            C = librosa.cqt(
+                y,
+                sr=sr,
+                hop_length=int(self.cqt_params["hop_length"]),
+                fmin=fmin,
+                n_bins=int(self.cqt_params["n_bins"]),
+                bins_per_octave=int(self.cqt_params["bins_per_octave"]),
+                scale=scale,
+            )
+            C_mag = np.abs(C)
+            out = librosa.amplitude_to_db(C_mag, ref=np.max).astype(np.float32)
+            if self.image_size:
+                out = self._resize_2d(out, self.image_size, self.image_size)
+            return out
+
         elif tkey == "dwt":
             try:
                 import pywt
@@ -263,8 +300,8 @@ class InferenceRunner:
                 ) from e
 
             wavelet = self.dwt_params.get("wavelet", "db4")
-            level   = int(self.dwt_params.get("level", 4))
-            mode    = self.dwt_params.get("mode", "symmetric")
+            level = int(self.dwt_params.get("level", 4))
+            mode = self.dwt_params.get("mode", "symmetric")
 
             # Target size for DWT: use image_size if provided, else 224
             target_size = int(self.image_size) if (self.image_size is not None) else 224
@@ -410,5 +447,6 @@ class FakeProbabilityGauge:
             return self._to_percent(scores["confidence"])
         numeric = [v for v in scores.values() if isinstance(v, (int, float))]
         return self._to_percent(max(numeric)) if numeric else 0.0
+
 
 

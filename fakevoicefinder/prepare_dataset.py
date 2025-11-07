@@ -7,7 +7,7 @@ Purpose
 This helper takes the two audio archives declared in the experiment config
 (`real.zip` and `fake.zip`), builds the train/test split, materializes the
 original audio files inside the current experiment, and generates the feature
-tensors (MEL, LOG, DWT) that the training code consumes.
+tensors (MEL, LOG, DWT, CQT) that the training code consumes.
 
 What it reads
 -------------
@@ -23,9 +23,6 @@ What it writes
     outputs/<EXP>/datasets/<split>/transforms/<transform>/{real|fake}/<basename>.npy
   DWT outputs are always resized to a square image (cfg.image_size or 224) to
   stay compatible with CNN / ViT style backbones.
-- The experiment manifest (experiment.json) is updated to:
-    - record the number of items in the train/test original datasets
-    - record the transform hyperparameters that were actually used
 
 Key traits
 ----------
@@ -78,14 +75,14 @@ class PrepareDataset:
       - cfg.data_path : root folder where real/fake ZIPs live
       - cfg.real_zip  : name of the ZIP that contains real audios
       - cfg.fake_zip  : name of the ZIP that contains fake audios
-      - optional per-transform params: cfg.mel_params / cfg.log_params / cfg.dwt_params
+      - optional per-transform params: cfg.mel_params / cfg.log_params / cfg.dwt_params / cfg.cqt_params
       - optional window/time control: cfg.clip_seconds
       - optional spatial size for spectrogram-like features: cfg.image_size
 
     Outputs (written under this experiment):
       - /datasets/train/original/{real,fake}/...
       - /datasets/test/original/{real,fake}/...
-      - /datasets/<split>/transforms/<mel|log|dwt>/{real,fake}/... .npy
+      - /datasets/<split>/transforms/<mel|log|dwt|cqt>/{real,fake}/... .npy
       - experiment.json is updated with counters and transform params
     """
 
@@ -109,10 +106,32 @@ class PrepareDataset:
         self.test_items: List[LabeledMember] = []
 
         # Transform params (defaults)
-        self.sample_rate = 16000
-        self.mel_params = dict(n_mels=128, n_fft=1024, hop_length=256, win_length=None, fmin=0, fmax=None)
+        self.sample_rate = 16000  # sr = 16 kHz (standard TTS/V2V)
+
+        self.mel_params = dict(
+            n_mels=128,
+            n_fft=1024,
+            hop_length=256,
+            win_length=None,
+            fmin=0,
+            fmax=None,
+        )
         self.log_params = dict(n_fft=1024, hop_length=256, win_length=None)
         self.dwt_params = dict(wavelet="db4", level=4, mode="symmetric")  # DWT → resize to image_size or 224
+
+        # CQT defaults (tabla):
+        #   hop_length = 256
+        #   n_bins     ≈ 84–120  → usamos 96 por defecto (término medio)
+        #   bins_per_octave = 12 o 24 → usamos 24 para mayor detalle en formantes
+        #   fmin = C1 (puedes cambiar a C2 vía cfg.cqt_params["fmin"])
+        #   scale = True (distribución espectral más estable)
+        self.cqt_params = dict(
+            hop_length=256,
+            fmin=float(librosa.note_to_hz("C1")),
+            bins_per_octave=24,
+            n_bins=96,
+            scale=True,
+        )
 
         # ---- Optional overrides coming from cfg (minimal change) ----
         user_mel = getattr(self.cfg, "mel_params", None)
@@ -127,6 +146,10 @@ class PrepareDataset:
         if isinstance(user_dwt, dict) and user_dwt:
             self.dwt_params.update(user_dwt)
 
+        user_cqt = getattr(self.cfg, "cqt_params", None)
+        if isinstance(user_cqt, dict) and user_cqt:
+            self.cqt_params.update(user_cqt)
+
         # Clip/pad window in seconds. Default is 3.0 if not specified.
         clip_val = getattr(self.cfg, "clip_seconds", None)
         try:
@@ -137,7 +160,8 @@ class PrepareDataset:
             cs = 3.0
         self.clip_seconds = cs
 
-        # Optional image side for MEL/LOG/DWT (e.g. 224 for ViT). None = DWT→224 and no resize for MEL/LOG.
+        # Optional image side for MEL/LOG/DWT/CQT (e.g. 224 for ViT).
+        # None = DWT→224 and no resize for MEL/LOG/CQT.
         img_sz = getattr(self.cfg, "image_size", None)
         try:
             self.image_size = int(img_sz) if img_sz is not None else None
@@ -191,18 +215,28 @@ class PrepareDataset:
         labels: List[int] = [0] * len(real) + [1] * len(fake)
 
         x_train, x_test, y_train, y_test = train_test_split(
-            items, labels, test_size=(1.0 - float(train_ratio)),
-            random_state=int(seed), stratify=labels, shuffle=True
+            items,
+            labels,
+            test_size=(1.0 - float(train_ratio)),
+            random_state=int(seed),
+            stratify=labels,
+            shuffle=True,
         )
 
         self.train_items = list(zip(x_train, y_train))
         self.test_items = list(zip(x_test, y_test))
 
         return {
-            "train": {"total": len(self.train_items), "real": sum(1 for _, y in self.train_items if y == 0),
-                      "fake": sum(1 for _, y in self.train_items if y == 1)},
-            "test":  {"total": len(self.test_items),  "real": sum(1 for _, y in self.test_items  if y == 0),
-                      "fake": sum(1 for _, y in self.test_items  if y == 1)},
+            "train": {
+                "total": len(self.train_items),
+                "real": sum(1 for _, y in self.train_items if y == 0),
+                "fake": sum(1 for _, y in self.train_items if y == 1),
+            },
+            "test": {
+                "total": len(self.test_items),
+                "real": sum(1 for _, y in self.test_items if y == 0),
+                "fake": sum(1 for _, y in self.test_items if y == 1),
+            },
         }
 
     # 3) SAVE ORIGINALS ------------------------------------------------------
@@ -210,20 +244,20 @@ class PrepareDataset:
     def save_original(self) -> Dict[str, int]:
         """Extract the selected ZIP members to the experiment/original folders, keeping their filenames."""
         out_train = self.exp.train_orig
-        out_test  = self.exp.test_orig
+        out_test = self.exp.test_orig
         (out_train / "real").mkdir(parents=True, exist_ok=True)
         (out_train / "fake").mkdir(parents=True, exist_ok=True)
-        (out_test  / "real").mkdir(parents=True, exist_ok=True)
-        (out_test  / "fake").mkdir(parents=True, exist_ok=True)
+        (out_test / "real").mkdir(parents=True, exist_ok=True)
+        (out_test / "fake").mkdir(parents=True, exist_ok=True)
 
         n_train = self._extract_members(self.train_items, out_train)
-        n_test  = self._extract_members(self.test_items,  out_test)
+        n_test = self._extract_members(self.test_items, out_test)
 
         # Update num_items in experiment.json (count audios under originals)
         ex = self.exp.experiment_dict
         if ex:
             ex["train_data"]["original_dataset"]["num_items"] = self._count_audio_files_in(out_train)
-            ex["test_data"]["original_dataset"]["num_items"]  = self._count_audio_files_in(out_test)
+            ex["test_data"]["original_dataset"]["num_items"] = self._count_audio_files_in(out_test)
             self.exp.update_manifest()
 
         return {"train": n_train, "test": n_test}
@@ -262,21 +296,21 @@ class PrepareDataset:
 
     def transform(self, transform_name: str) -> Dict[str, int]:
         """
-        Apply one transform ('mel', 'log', or 'dwt') to train/test originals and
+        Apply one transform ('mel', 'log', 'dwt' or 'cqt') to train/test originals and
         save the result as .npy in the corresponding transforms folder.
         """
         tkey = transform_name.lower()
-        if tkey not in {"mel", "log", "dwt"}:
-            raise ValueError("transform_name must be 'mel', 'log' o 'dwt'.")
+        if tkey not in {"mel", "log", "dwt", "cqt"}:
+            raise ValueError("transform_name must be 'mel', 'log', 'dwt' o 'cqt'.")
 
         # Ensure destinations
         (self.exp.train_tf_root / tkey / "real").mkdir(parents=True, exist_ok=True)
         (self.exp.train_tf_root / tkey / "fake").mkdir(parents=True, exist_ok=True)
-        (self.exp.test_tf_root  / tkey / "real").mkdir(parents=True, exist_ok=True)
-        (self.exp.test_tf_root  / tkey / "fake").mkdir(parents=True, exist_ok=True)
+        (self.exp.test_tf_root / tkey / "real").mkdir(parents=True, exist_ok=True)
+        (self.exp.test_tf_root / tkey / "fake").mkdir(parents=True, exist_ok=True)
 
         n_train = self._transform_split(self.exp.train_orig, self.exp.train_tf_root / tkey, tkey)
-        n_test  = self._transform_split(self.exp.test_orig,  self.exp.test_tf_root  / tkey, tkey)
+        n_test = self._transform_split(self.exp.test_orig, self.exp.test_tf_root / tkey, tkey)
 
         # Persist transform hyperparameters to the manifest
         self.update_experiment_json(tkey)
@@ -334,7 +368,8 @@ class PrepareDataset:
     def _apply_transform(self, y: np.ndarray, sr: int, tkey: str) -> np.ndarray:
         if tkey == "mel":
             S = librosa.feature.melspectrogram(
-                y=y, sr=sr,
+                y=y,
+                sr=sr,
                 n_mels=self.mel_params["n_mels"],
                 n_fft=self.mel_params["n_fft"],
                 hop_length=self.mel_params["hop_length"],
@@ -363,11 +398,36 @@ class PrepareDataset:
                 out = self._resize_2d(out, self.image_size, self.image_size)
             return out
 
+        elif tkey == "cqt":
+            # Constant-Q transform → magnitude in dB
+            fmin = self.cqt_params.get("fmin")
+            if fmin is None:
+                fmin = float(librosa.note_to_hz("C1"))
+            else:
+                fmin = float(fmin)
+
+            scale = bool(self.cqt_params.get("scale", True))
+
+            C = librosa.cqt(
+                y,
+                sr=sr,
+                hop_length=int(self.cqt_params["hop_length"]),
+                fmin=fmin,
+                n_bins=int(self.cqt_params["n_bins"]),
+                bins_per_octave=int(self.cqt_params["bins_per_octave"]),
+                scale=scale,
+            )
+            C_mag = np.abs(C)
+            out = librosa.amplitude_to_db(C_mag, ref=np.max)
+            if self.image_size:
+                out = self._resize_2d(out, self.image_size, self.image_size)
+            return out
+
         elif tkey == "dwt":
             # DWT scalogram 2D → rows = [cA_L, cD_L, ..., cD_1] → dB → resize to (image_size or 224)
             wavelet = self.dwt_params.get("wavelet", "db4")
-            level   = int(self.dwt_params.get("level", 4))
-            mode    = self.dwt_params.get("mode", "symmetric")
+            level = int(self.dwt_params.get("level", 4))
+            mode = self.dwt_params.get("mode", "symmetric")
 
             # Final size: cfg.image_size if provided, otherwise 224
             target_size = int(self.image_size) if (self.image_size is not None) else 224
@@ -416,13 +476,19 @@ class PrepareDataset:
 
     def _params_for_transform(self, tkey: str) -> Dict[str, Any]:
         # Always store sample_rate, clip_seconds and image_size together with the transform params
-        base = {"sample_rate": self.sample_rate, "clip_seconds": self.clip_seconds, "image_size": self.image_size}
+        base = {
+            "sample_rate": self.sample_rate,
+            "clip_seconds": self.clip_seconds,
+            "image_size": self.image_size,
+        }
         if tkey == "mel":
             return {**base, **self.mel_params}
         if tkey == "log":
             return {**base, **self.log_params}
         if tkey == "dwt":
             return {**base, **self.dwt_params}
+        if tkey == "cqt":
+            return {**base, **self.cqt_params}
         return {}
 
 
